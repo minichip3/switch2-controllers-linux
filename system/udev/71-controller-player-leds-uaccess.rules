@@ -1,0 +1,3 @@
+# Make controller player LEDs writable by the desktop user.
+ACTION=="add", SUBSYSTEM=="leds", KERNEL=="*:player-*", RUN+="/bin/chmod a+w /sys/class/leds/%k/brightness"
+ACTION=="add", SUBSYSTEM=="leds", KERNEL=="*:rgb:indicator", RUN+="/bin/chmod a+w /sys/class/leds/%k/brightness /sys/class/leds/%k/multi_intensity"

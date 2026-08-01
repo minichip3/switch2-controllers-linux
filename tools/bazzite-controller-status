@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""Game-night sanity check: who is P1/P2/P3/P4 right now, everywhere.
+
+Usage: bazzite-controller-status            # print table
+       bazzite-controller-status --apply    # also re-run all emulator syncs
+"""
+from __future__ import annotations
+
+import json
+import re
+import socket
+import subprocess
+import sys
+from pathlib import Path
+
+HOME = Path.home()
+DETECTOR = HOME / ".local/bin/bazzite-controller-detect.py"
+DOLPHIN_INI_CANDIDATES = (
+    HOME / ".var/app/org.DolphinEmu.dolphin-emu/config/dolphin-emu/GCPadNew.ini",
+    HOME / ".config/dolphin-emu/GCPadNew.ini",
+)
+EDEN_INI = HOME / ".config/eden/qt-config.ini"
+RA_OVERLAY = Path("/run/user/1000/bazzite-retroarch-input.cfg")
+
+NICE = {
+    "gamecube_nso": "NSO GameCube (bridge)",
+    "switch2_pro": "Switch 2 Pro (bridge)",
+    "dualsense": "DualSense",
+    "mcon": "MCON",
+    "xbox": "MCON (xbox mode)",
+    "exlene": "EXLENE Switch Pro",
+    "n64_nso": "NSO N64",
+}
+
+
+def pads() -> list[dict]:
+    out = subprocess.check_output(["python3", str(DETECTOR), "--json"], text=True, timeout=15)
+    return json.loads(out)
+
+
+def dolphin_ports() -> dict[int, str]:
+    ports: dict[int, str] = {}
+    for ini in DOLPHIN_INI_CANDIDATES:
+        if not ini.is_file():
+            continue
+        port = None
+        for line in ini.read_text(encoding="utf-8", errors="replace").splitlines():
+            m = re.match(r"\[GCPad(\d)\]", line.strip())
+            if m:
+                port = int(m.group(1))
+            elif port and line.strip().startswith("Device ="):
+                ports[port] = line.split("=", 1)[1].strip()
+        break
+    return ports
+
+
+def eden_players() -> dict[int, str]:
+    players: dict[int, str] = {}
+    if not EDEN_INI.is_file():
+        return players
+    text = EDEN_INI.read_text(encoding="utf-8", errors="replace")
+    for m in re.finditer(r"^player_(\d)_profile_name=(.+)$", text, re.M):
+        n = int(m.group(1))
+        if re.search(rf"^player_{n}_connected=true$", text, re.M):
+            players[n + 1] = m.group(2)
+    return players
+
+
+def retroarch_players() -> dict[int, str]:
+    players: dict[int, str] = {}
+    if not RA_OVERLAY.is_file():
+        return players
+    for m in re.finditer(
+        r'input_player(\d)_joypad_index = "(-?\d+)"', RA_OVERLAY.read_text()
+    ):
+        if m.group(2) != "-1":
+            players[int(m.group(1))] = f"sdl index {m.group(2)}"
+    return players
+
+
+def dsu_alive() -> bool:
+    import struct
+    import zlib
+
+    # DSU (cemuhook) version request: header needs a valid CRC32 or servers drop it.
+    payload = struct.pack("<I", 0x100000)
+    header = b"DSUC" + struct.pack("<HHII", 1001, len(payload), 0, 0xBA22)
+    pkt = bytearray(header + payload)
+    pkt[8:12] = struct.pack("<I", zlib.crc32(bytes(pkt)))
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.settimeout(0.5)
+        s.sendto(bytes(pkt), ("127.0.0.1", 26760))
+        s.recvfrom(128)
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def main() -> int:
+    if "--apply" in sys.argv:
+        for args in (["--dolphin"], ["--eden"], ["--retroarch", str(RA_OVERLAY)]):
+            subprocess.run(["python3", str(DETECTOR), *args], timeout=30)
+        led = Path.home() / ".local/bin/bazzite-set-player-leds.py"
+        if led.is_file():
+            subprocess.run(["python3", str(led), "--mode", "auto"], timeout=15)
+        print()
+
+    detected = pads()
+    print("=== Connected controllers (player order everywhere) ===")
+    if not detected:
+        print("  none detected")
+    for i, p in enumerate(detected):
+        nice = NICE.get(p["kind"], p["kind"])
+        print(f"  P{i + 1}: {nice}  [{p['name']}]  mac={p.get('mac') or '-'}")
+
+    print("\n=== Dolphin (GameCube/Wii) ===")
+    for port, dev in sorted(dolphin_ports().items()):
+        print(f"  GCPad{port} + Wiimote{port}: {dev or '(empty)'}")
+
+    print("\n=== Eden (Switch) ===")
+    ep = eden_players()
+    if not ep:
+        print("  no players bound")
+    for n, prof in sorted(ep.items()):
+        print(f"  Player {n}: profile '{prof}'")
+
+    print("\n=== RetroArch (N64/NES/SNES/...) ===")
+    rp = retroarch_players()
+    if not rp:
+        print("  overlay not generated yet (created at launch)")
+    for n, idx in sorted(rp.items()):
+        print(f"  Player {n}: {idx}")
+
+    print(f"\nMotion (DSU) server on 26760: {'UP' if dsu_alive() else 'DOWN (start nso-gc)'}")
+    print("\nRule: Dolphin: P1 GameCube, P2 EXLENE, P3 Switch 2 Pro, P4 DualSense.")
+    print("      Eden/Switch fixed: P1 Switch 2 Pro, P2 GameCube, P3 DualSense, P4 N64.")
+    print("Missing pads are skipped; the order compacts (solo DualSense = P1).")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -38,12 +38,19 @@ if [[ -x "$PROJECT_DIR/scripts/install-decky.sh" ]]; then
   bash "$PROJECT_DIR/scripts/install-decky.sh" || true
 fi
 
+# Steam's Bluetooth.Enabled keeps LE discovery forever and blocks raw L2CAP
+# connects for Switch 2 pads. DualSense/etc stay usable via system BlueZ.
+if [[ -x "$PROJECT_DIR/scripts/disable-steam-bluetooth.py" ]]; then
+  python3 "$PROJECT_DIR/scripts/disable-steam-bluetooth.py" || true
+fi
+
 cat <<EOF
 
 Installed. Open **Switch 2 Controllers** from the app menu or Decky in Game Mode.
 
-  - Add each pad once (hold Sync) — hold Sync again to connect
+  - Add each pad once (hold Sync) — press a button again to connect
   - The bridge runs automatically in the background
+  - Steam Bluetooth scanning is disabled (needed for reliable S2 connects)
 
 Service:
   systemctl --user enable --now nso-gc.service

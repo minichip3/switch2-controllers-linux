@@ -20,8 +20,8 @@ DEFAULT_CONFIG = Path.home() / ".config/Ryujinx/Config.json"
 
 # DSU slot per controller (matches the ngc bridge player order: player N -> slot N-1).
 SLOT_BY_NAME = [
-    ("pro controller 2", 1),
-    ("gamecube", 0),
+    ("pro controller 2", 0),
+    ("gamecube", 1),
 ]
 
 

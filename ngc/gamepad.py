@@ -1,9 +1,8 @@
-"""Linux virtual gamepad (uinput) for the NSO GameCube controller.
+"""Linux virtual gamepad (uinput) for Switch 2 controllers.
 
-Presents a standard dual-stick gamepad with analog triggers so SDL/Steam Input
-and games recognise it without a custom mapping. Outputs an Xbox-style button
-layout (the most broadly compatible) while preserving the GameCube's true
-analog L/R triggers and C-stick.
+Presents a standard dual-stick gamepad with analog triggers (GameCube) or
+digital ZL/ZR (Pro / Joy-Con) so SDL, Steam Input, and emulators recognise
+pads without custom kernel support.
 """
 
 from __future__ import annotations
@@ -16,6 +15,7 @@ from typing import Callable, Optional
 from evdev import UInput, AbsInfo, ecodes as e
 
 from . import protocol as P
+from .motion_evdev import phys_for_mac
 
 logger = logging.getLogger(__name__)
 
@@ -27,28 +27,69 @@ _EVENT_SIZE = struct.calcsize(_EVENT_FMT)
 STICK_MIN, STICK_MAX = -32768, 32767
 TRIGGER_MIN, TRIGGER_MAX = 0, 255
 
-# Switch button name -> evdev key. Face buttons use the standard Xbox-style
-# evdev positions (A->SOUTH, B->EAST, X->WEST, Y->NORTH). This is what Steam
-# Input expects, so the controller's printed labels match Steam's A/B/X/Y. The
-# emulator side accounts for the GameCube/Switch labels in its own profile
-# (e.g. GC_nso_gamecube.ini maps GameCube A to `Button S`).
-DEFAULT_BUTTON_MAP = {
-    "A": e.BTN_SOUTH,    # A -> SDL South (Steam A)
-    "B": e.BTN_EAST,     # B -> SDL East  (Steam B)
-    "X": e.BTN_WEST,     # X -> SDL West  (Steam X)
-    "Y": e.BTN_NORTH,    # Y -> SDL North (Steam Y)
-    "L": e.BTN_TL,       # left trigger digital click
-    "R": e.BTN_TR,       # right trigger digital click
-    "ZL": e.BTN_TL2,     # extra shoulder (digital)
-    "ZR": e.BTN_TR2,     # GameCube Z (commonly mapped here)
+# --------------------------------------------------------------------------- #
+# Evdev maps                                                                   #
+#                                                                             #
+# BLE input uses the unified Switch 2 bitmask in protocol.SWITCH_BUTTONS      #
+# (Nadeflore/switch2-controllers, bitaxislabs). On the NSO GameCube pad the   #
+# ZR bit (0x80) is physical Z; R bit (0x40) is R trigger full-click. For Steam /
+# Switch-style layouts, ZL+ L -> BTN_TL (left bumper) and Z+ R click -> BTN_TR
+# (right bumper). C -> BTN_SELECT (minus). Analog L/R stay on trigger axes.      #
+#                                                                             #
+# Face buttons use semantic evdev positions (A=SOUTH, B=EAST, X=WEST, Y=NORTH).
+# BTN_C (306) sits between B and the face cluster, so SDL's auto gamecontrollerdb
+# assigns x:b3/y:b4 to the wrong indices — install-emulator-integration.sh writes
+# a corrected mapping for Steam. Dolphin uses WEST/NORTH tokens directly.
+#
+# NSO GameCube has Start (PLUS bit) and Home (HOME bit), no Select/MINUS.
+# Capture/C need misc slots in gamecontrollerdb.
+# --------------------------------------------------------------------------- #
+
+PRO_BUTTON_MAP = {
+    "A": e.BTN_SOUTH,
+    "B": e.BTN_EAST,
+    "X": e.BTN_WEST,
+    "Y": e.BTN_NORTH,
+    "L": e.BTN_TL,
+    "R": e.BTN_TR,
+    "ZL": e.BTN_TL2,
+    "ZR": e.BTN_TR2,
     "PLUS": e.BTN_START,
     "MINUS": e.BTN_SELECT,
     "HOME": e.BTN_MODE,
     "CAPTURE": e.BTN_Z,
-    "C": e.BTN_C,        # NSO "C" (GameChat) button
+    "C": e.BTN_C,
     "L_STK": e.BTN_THUMBL,
     "R_STK": e.BTN_THUMBR,
 }
+
+# ZL/Z and L/R click share shoulder slots so Steam and emulators see standard bumpers.
+GAMECUBE_BUTTON_MAP = {
+    "A": e.BTN_SOUTH,
+    "B": e.BTN_EAST,
+    # NSO GC face layout: X is left (north on diamond), Y is top (west on diamond).
+    "X": e.BTN_NORTH,
+    "Y": e.BTN_WEST,
+    "L": e.BTN_TL,
+    "R": e.BTN_TR,
+    "ZL": e.BTN_TL,       # left bumper (with L click)
+    "ZR": e.BTN_TR,       # right bumper / physical Z (with R click)
+    "PLUS": e.BTN_START,   # GC Start; BLE PLUS bit (not MINUS)
+    "HOME": e.BTN_MODE,    # GC Nintendo/Home
+    "CAPTURE": e.BTN_Z,    # screenshot; b4 -> misc2 in gamecontrollerdb
+    "C": e.BTN_SELECT,     # minus / back (GC has no Select; C fills that slot)
+    "L_STK": e.BTN_THUMBL,
+    "R_STK": e.BTN_THUMBR,
+}
+
+DEFAULT_BUTTON_MAP = PRO_BUTTON_MAP
+
+
+def button_map_for_product(product_id: int) -> dict:
+    """Return the default evdev map for a Switch 2 controller PID."""
+    if product_id == P.NSO_GAMECUBE_PID:
+        return GAMECUBE_BUTTON_MAP
+    return PRO_BUTTON_MAP
 
 
 class SwitchGamepad:
@@ -57,6 +98,7 @@ class SwitchGamepad:
         name: str = "NSO GameCube Controller",
         button_map=None,
         product: int = P.NSO_GAMECUBE_PID,
+        mac: str = "",
     ):
         self.button_map = button_map or DEFAULT_BUTTON_MAP
         keys = sorted(set(self.button_map.values()))
@@ -73,35 +115,32 @@ class SwitchGamepad:
                 (e.ABS_HAT0X, AbsInfo(0, -1, 1, 0, 0, 0)),
                 (e.ABS_HAT0Y, AbsInfo(0, -1, 1, 0, 0, 0)),
             ],
-            # Advertise rumble so SDL/Steam route force-feedback to us.
             e.EV_FF: [e.FF_RUMBLE, e.FF_PERIODIC, e.FF_CONSTANT, e.FF_GAIN],
         }
 
-        # vendor/product identify the controller to SDL; use Nintendo's IDs.
+        phys = phys_for_mac(mac) if mac else "py-evdev-uinput"
         self.ui = UInput(
             capabilities,
             name=name,
             vendor=P.NINTENDO_VENDOR_ID,
             product=product,
             version=0x0100,
+            bustype=e.BUS_BLUETOOTH,
+            phys=phys,
         )
         logger.info("created virtual gamepad: %s", self.ui.device.path if self.ui.device else name)
 
         self._last_keys: dict[int, int] = {}
         self._last_abs: dict[int, int] = {}
 
-        # Force-feedback: callback(strong 0..1, weak 0..1) wired by the bridge.
         self.rumble_cb: Optional[Callable[[float, float], None]] = None
         self._effects: dict[int, tuple[int, int]] = {}
         self._ff_running = True
         self._ff_thread = threading.Thread(target=self._ff_loop, daemon=True)
         self._ff_thread.start()
 
-    # ------------------------------------------------------------------ #
-
     @staticmethod
     def _scale_stick(value: float) -> int:
-        """Map a calibrated -1.0..1.0 axis to the int16 range."""
         v = int(value * STICK_MAX)
         return max(STICK_MIN, min(STICK_MAX, v))
 
@@ -129,11 +168,16 @@ class SwitchGamepad:
     ) -> None:
         changed = False
 
+        # Emit every mapped key each frame; OR switch names that share a code
+        # (GC R trigger click and Z both use Shoulder R / BTN_TR).
+        key_states = {code: 0 for code in set(self.button_map.values())}
         for switch_name, key_code in self.button_map.items():
             mask = P.SWITCH_BUTTONS.get(switch_name, 0)
-            changed |= self._emit_key(key_code, 1 if (buttons & mask) else 0)
+            if mask and (buttons & mask):
+                key_states[key_code] = 1
+        for key_code, pressed in key_states.items():
+            changed |= self._emit_key(key_code, pressed)
 
-        # D-pad -> hat axes
         dpad_x = (1 if buttons & P.SWITCH_BUTTONS["RIGHT"] else 0) - (
             1 if buttons & P.SWITCH_BUTTONS["LEFT"] else 0
         )
@@ -143,13 +187,10 @@ class SwitchGamepad:
         changed |= self._emit_abs(e.ABS_HAT0X, dpad_x)
         changed |= self._emit_abs(e.ABS_HAT0Y, dpad_y)
 
-        # Sticks (Y inverted: gamepad convention is up = negative)
         changed |= self._emit_abs(e.ABS_X, self._scale_stick(left_stick[0]))
         changed |= self._emit_abs(e.ABS_Y, -self._scale_stick(left_stick[1]))
         changed |= self._emit_abs(e.ABS_RX, self._scale_stick(right_stick[0]))
         changed |= self._emit_abs(e.ABS_RY, -self._scale_stick(right_stick[1]))
-
-        # Analog triggers
         changed |= self._emit_abs(e.ABS_Z, max(0, min(255, left_trigger)))
         changed |= self._emit_abs(e.ABS_RZ, max(0, min(255, right_trigger)))
 
@@ -157,7 +198,6 @@ class SwitchGamepad:
             self.ui.syn()
 
     def release_all(self) -> None:
-        """Neutralize all inputs but keep the uinput node alive for Steam/SDL."""
         changed = False
         for code in list(self._last_keys):
             changed |= self._emit_key(code, 0)
@@ -175,11 +215,7 @@ class SwitchGamepad:
         if changed:
             self.ui.syn()
 
-    # ------------------------------------------------------------------ #
-
     def _ff_loop(self) -> None:
-        """Read FF upload/erase/play events from the uinput fd and translate
-        rumble effects into controller vibration via ``rumble_cb``."""
         try:
             for event in self.ui.read_loop():
                 if not self._ff_running:
@@ -188,7 +224,7 @@ class SwitchGamepad:
                     self._handle_ff_event(event.type, event.code, event.value)
                 except Exception:  # noqa: BLE001
                     pass
-        except Exception:  # noqa: BLE001 - fd closed on shutdown
+        except Exception:  # noqa: BLE001
             pass
 
     def _handle_ff_event(self, etype: int, code: int, value: int) -> None:
@@ -227,5 +263,4 @@ class SwitchGamepad:
             pass
 
 
-# Backwards-compatible alias (older tools import GameCubeGamepad).
 GameCubeGamepad = SwitchGamepad

@@ -13,7 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ngc import protocol as P
-from ngc.device import GameCubeController, HANDLE_VIBRATION
+from ngc.device import GameCubeController
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 

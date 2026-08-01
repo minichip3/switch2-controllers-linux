@@ -172,7 +172,7 @@ class SwitchController:
         self._read_calibration()
 
         self._retry("player LEDs", lambda: self.set_player_leds(player))
-        self._retry("vibration test", lambda: self.play_vibration_preset(0x03))
+        self._retry("vibration test", lambda: self.play_vibration_preset(P.GC_VIBRATION_PRESET_SOFT))
         self._retry("enable features", lambda: self.enable_features(0x03 | P.FEATURE_MOTION))
 
         if self.has_hd_rumble:
@@ -353,20 +353,30 @@ class SwitchController:
             active = True
             time.sleep(0.016)
 
+    # GameCube preset rumble: map SDL/Steam FF magnitude to one of three clips.
+    # Real GC titles mostly use soft motor output; hard hits spike briefly.
+    GC_IMPACT_THRESHOLD = 0.52   # strong preset — explosions, heavy hits
+    GC_LIGHT_THRESHOLD = 0.06      # below this, ignore (FF noise floor)
+    GC_SUSTAIN_INTERVAL_S = 0.22   # retrigger soft preset while FF is held
+
+    def _gc_preset_for_magnitude(self, magnitude: float) -> int | None:
+        """Pick a built-in preset from combined FF magnitude (0..1).
+
+        Preset 3 is softest, 2 is strongest; preset 1 (medium) is unused in
+        games — it reads too harsh for ambient rumble.
+        """
+        if magnitude < self.GC_LIGHT_THRESHOLD:
+            return None
+        if magnitude >= self.GC_IMPACT_THRESHOLD:
+            return P.GC_VIBRATION_PRESET_STRONG
+        return P.GC_VIBRATION_PRESET_SOFT
+
     def set_rumble(self, strong: float, weak: float) -> None:
         """Drive vibration from normalised 0..1 force-feedback magnitudes.
 
         HD-rumble controllers (Pro / Joy-Con) get the real motor packet via the
-        sustaining worker. The GameCube pad has no HD actuator (its motor
-        characteristic powers it off) and can only replay built-in presets,
-        which have no amplitude control: preset 2 is a strong sustained buzz,
-        preset 3 a light tap.
-
-        To avoid a constant strong slam when a game holds rumble, this is
-        edge-driven: a fresh rumble onset (e.g. Steam's ping, an impact) fires
-        the strong preset once, while a *sustained* effect only emits gentle
-        light pulses at a relaxed cadence. So single events feel punchy without
-        continuous rumble being overwhelming.
+        sustaining worker. The GameCube pad replays built-in presets only:
+        soft (3) for most feedback, strong (2) for heavy impacts.
         """
         if self.has_hd_rumble:
             self._hd_target = (max(0.0, strong), max(0.0, weak))
@@ -377,20 +387,22 @@ class SwitchController:
         now = time.monotonic()
         prev = self._last_rumble_mag
         self._last_rumble_mag = magnitude
-        if magnitude <= 0.02:
-            return  # presets are one-shot; nothing to stop
+        if magnitude <= self.GC_LIGHT_THRESHOLD:
+            return
 
-        rising = prev <= 0.02  # transition from idle -> a new rumble event
+        rising = prev <= self.GC_LIGHT_THRESHOLD
         if rising:
-            # New event: a solid buzz. Low-magnitude one-shots (like Steam's
-            # ping) still get the strong preset so they are clearly felt.
+            preset = self._gc_preset_for_magnitude(magnitude)
+            if preset is None:
+                return
             self._last_rumble_ts = now
-            self.play_vibration_preset(0x02 if magnitude >= 0.15 else 0x03)
-        elif now - self._last_rumble_ts >= 0.35:
-            # Held/continuous rumble: gentle periodic light tap, never the
-            # strong preset, so sustained effects don't buzz constantly.
+            self.play_vibration_preset(preset)
+        elif now - self._last_rumble_ts >= self.GC_SUSTAIN_INTERVAL_S:
+            preset = self._gc_preset_for_magnitude(magnitude)
+            if preset is None:
+                return
             self._last_rumble_ts = now
-            self.play_vibration_preset(0x03)
+            self.play_vibration_preset(preset)
 
     # ------------------------------------------------------------------ #
 
@@ -401,6 +413,11 @@ class SwitchController:
         if self.has_analog_triggers:
             lt = P.normalize_trigger(report.left_trigger_raw, self.trigger_neutral[0])
             rt = P.normalize_trigger(report.right_trigger_raw, self.trigger_neutral[1])
+            # Digital L/R bits fire at full pull; keep axes in sync with shoulders.
+            if report.buttons & P.SWITCH_BUTTONS["L"]:
+                lt = 255
+            if report.buttons & P.SWITCH_BUTTONS["R"]:
+                rt = 255
         else:
             # Digital ZL/ZR -> full-scale trigger axis.
             lt = 255 if report.buttons & P.SWITCH_BUTTONS["ZL"] else 0

@@ -86,6 +86,12 @@ SUBCOMMAND_LEDS_SET_PLAYER = 0x07
 COMMAND_VIBRATION = 0x0A
 SUBCOMMAND_VIBRATION_PLAY_PRESET = 0x02
 
+# NSO GameCube pad built-in haptic clips (no HD motor — preset IDs only).
+# Verified on hardware: 3=softest, 1=medium, 2=strongest.
+GC_VIBRATION_PRESET_STRONG = 0x02
+GC_VIBRATION_PRESET_MEDIUM = 0x01
+GC_VIBRATION_PRESET_SOFT = 0x03
+
 COMMAND_MEMORY = 0x02
 SUBCOMMAND_MEMORY_READ = 0x04
 
@@ -149,9 +155,19 @@ LED_PATTERN = {1: 0x01, 2: 0x03, 3: 0x07, 4: 0x0F, 5: 0x09, 6: 0x05, 7: 0x0D, 8:
 # Default GameCube trigger neutral when factory calibration is unreadable
 # (value from BlueRetro: neutral ~30, full press ~195/255).
 GC_TRIGGER_DEFAULT_NEUTRAL = 30
+# Post-calibration deadzone and full-click threshold (reference implementations).
+GC_TRIGGER_DEADZONE = 35
+GC_TRIGGER_CLICK_THRESHOLD = 209
 
 # --------------------------------------------------------------------------- #
 # Button bitmask (32-bit LE, report bytes [4:8])                                #
+#
+# Shared across Pro / Joy-Con / GameCube BLE reports (Nadeflore, bitaxislabs).
+# On the NSO GameCube pad specifically:
+#   ZR (0x80) = physical Z button
+#   R  (0x40) = R trigger digital full-click
+#   ZL (0x00800000) = physical ZL mirror button
+#   L  (0x00400000) = L trigger digital full-click
 # --------------------------------------------------------------------------- #
 
 SWITCH_BUTTONS = {
@@ -255,7 +271,20 @@ def normalize_trigger(raw: int, neutral: int) -> int:
     if neutral >= 255:
         return 0
     val = (raw - neutral) * 255 // (255 - neutral)
-    return max(0, min(255, val))
+    return apply_trigger_deadzone(val, GC_TRIGGER_DEADZONE)
+
+
+def apply_trigger_deadzone(value: int, deadzone: int = GC_TRIGGER_DEADZONE) -> int:
+    """Zero small trigger noise and snap to full scale past the click threshold."""
+    if value <= deadzone:
+        return 0
+    if value >= GC_TRIGGER_CLICK_THRESHOLD:
+        return 255
+    span = GC_TRIGGER_CLICK_THRESHOLD - deadzone
+    if span <= 0:
+        return 255
+    scaled = (value - deadzone) * 255 // span
+    return max(0, min(255, scaled))
 
 
 # --------------------------------------------------------------------------- #

@@ -1,0 +1,3 @@
+# ngc BLE bridge IMU evdev nodes (INPUT_PROP_ACCELEROMETER) need session ACL
+# like joysticks. Fedora's uaccess rules only tag ID_INPUT_JOYSTICK, not accel.
+SUBSYSTEM=="input", ENV{PHYS}=="ngc/*", ENV{ID_INPUT_ACCELEROMETER}=="1", TAG+="uaccess"

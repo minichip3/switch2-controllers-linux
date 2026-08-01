@@ -309,6 +309,14 @@ class DSUServer:
                 elif msg_type == MSG_DATA:
                     with self._clients_lock:
                         self._clients[addr] = time.monotonic()
+                    # Eden/yuzu poll with PadData requests and expect an immediate
+                    # DSUS reply, not only the next BLE input frame broadcast.
+                    for slot in range(4):
+                        if self.slots[slot].connected:
+                            try:
+                                self.sock.sendto(self._pad_data(slot), addr)
+                            except OSError:
+                                pass
             except OSError:
                 pass
 

@@ -2,15 +2,17 @@
 uinput virtual gamepad each, with automatic reconnection. Pure userspace; no
 BlueZ GATT, no kernel modules.
 
-Connection follows the Nadeflore discoverer model: one BLE scanner watches for
-advertisements from configured controllers and initiates a raw L2CAP connect
-immediately when a pad wakes (button press or pairing mode).
+Connection uses a central BLE scanner: when a saved pad advertises (button press
+or Sync), we stop scanning and dial L2CAP immediately. Raw connect cannot run
+while the adapter is discovering — including Steam's background scan — so scan
+bursts are kept short and always stopped before connect.
 """
 
 from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import json
 import logging
 import os
 import subprocess
@@ -23,11 +25,15 @@ from bleak import BleakScanner
 
 from . import att
 from . import protocol as P
-from .config import Config, ControllerEntry
+from .config import CONFIG_DIR, Config, ControllerEntry
 from .device import SwitchController
 from .dsu import DSUServer
 from .gamepad import SwitchGamepad
+from .motion_evdev import MotionEvdev
 from .status import BridgeState, ControllerState, clear_state, write_state
+
+# Written by system/bazzite-set-player-leds.py when emulator player order changes.
+_LED_PLAYERS_PATH = CONFIG_DIR / "led-players.json"
 
 
 def _stick_to_dsu(value: float) -> int:
@@ -40,23 +46,141 @@ logger = logging.getLogger(__name__)
 _CONNECT_LOCK = threading.Lock()
 _STATUS_INTERVAL_S = 1.5
 _SCAN_SETTLE_S = 0.10
+# Per-attempt L2CAP connect wait. Short windows fail when Steam keeps LE scan
+# busy; after btmgmt stop-find -l a few hundred ms is enough.
+_CONNECT_ATTEMPT_S = 0.45
+_CONNECT_ATTEMPTS = 16
+
+
+def _adapter_index() -> str:
+    """Prefer hci0; allow override via NGC_HCI (e.g. '1')."""
+    return os.environ.get("NGC_HCI", "0").strip() or "0"
+
+
+_BTMGMT_LOCK = threading.Lock()
+_LAST_LE_SCAN_OFF = 0.0
+_LE_SCAN_OFF_MIN_INTERVAL_S = 0.35
+
+
+def _run_quiet(cmd: list[str], *, timeout: float = 2.0) -> None:
+    """Best-effort subprocess; never raises into the bridge."""
+    try:
+        subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _force_le_scan_off(*, force: bool = False) -> None:
+    """HCI-level LE discovery stop.
+
+    BlueZ ``StopDiscovery`` only ends *our* session. Steam/steamos-manager keeps
+    its own session forever (``Discovering`` stays true), which blocks raw L2CAP
+    create-connection. ``btmgmt stop-find -l`` stops the controller's LE scan
+    regardless of who started it. Requires passwordless ``sudo`` for btmgmt
+    (Bazzite default for this user).
+
+    Never raises — a hung btmgmt must not crash the bridge.
+    """
+    global _LAST_LE_SCAN_OFF
+    now = time.monotonic()
+    with _BTMGMT_LOCK:
+        if not force and (now - _LAST_LE_SCAN_OFF) < _LE_SCAN_OFF_MIN_INTERVAL_S:
+            return
+        _LAST_LE_SCAN_OFF = now
+        idx = _adapter_index()
+        # Start detached-ish: kill hung btmgmt so we never block the hub.
+        try:
+            proc = subprocess.Popen(
+                ["sudo", "-n", "btmgmt", "-i", idx, "stop-find", "-l"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            try:
+                proc.wait(timeout=1.5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                try:
+                    proc.wait(timeout=0.5)
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _bluez_remove_device(mac: str) -> None:
+    """Drop BlueZ's Device object so it can't race our raw ATT connect.
+
+    Do not call this while *we* already own a live session for ``mac`` — BlueZ
+    treating the ACL as its own Connected device means RemoveDevice tears the
+    link down.
+    """
+    if not mac:
+        return
+    _run_quiet(["bluetoothctl", "remove", mac], timeout=2.0)
+    path = f"/org/bluez/hci{_adapter_index()}/dev_{mac.upper().replace(':', '_')}"
+    _run_quiet(
+        ["busctl", "call", "org.bluez", f"/org/bluez/hci{_adapter_index()}",
+         "org.bluez.Adapter1", "RemoveDevice", "o", path],
+        timeout=1.5,
+    )
 
 
 def prepare_bluez_global() -> None:
     """Stop background scanning so raw LE connections can be initiated."""
     subprocess.run(["pkill", "-f", "decky-bluetooth-wake-control"],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run(["bluetoothctl", "scan", "off"],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+    _run_quiet(["bluetoothctl", "scan", "off"], timeout=1.5)
+    _run_quiet(
+        ["busctl", "call", "org.bluez", f"/org/bluez/hci{_adapter_index()}",
+         "org.bluez.Adapter1", "StopDiscovery"],
+        timeout=1.5,
+    )
+    _force_le_scan_off(force=True)
+
+
+def prepare_bluez(mac: str = "", *, remove: bool = False) -> None:
+    prepare_bluez_global()
+    if remove and mac:
+        _bluez_remove_device(mac)
 
 
 _REORDER_SCRIPTS = [
     "~/.local/bin/bazzite-dolphin-apply-gcpad1.sh",
+    "~/.local/bin/bazzite-eden-reset-controllers.py",
 ]
 
 
 def _reorder_enabled() -> bool:
     return os.environ.get("NGC_AUTO_REORDER", "1").lower() not in {"0", "false", "no"}
+
+
+def _read_led_players() -> dict[str, int]:
+    """MAC -> player (1-based) overrides from the LED sync tool."""
+    try:
+        raw = json.loads(_LED_PLAYERS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, int] = {}
+    for mac, player in raw.items():
+        try:
+            out[str(mac).upper()] = int(player)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _led_override_for(mac: str) -> Optional[int]:
+    player = _read_led_players().get(mac.upper())
+    if player is None:
+        return None
+    return min(max(player, 1), 8)
 
 
 def run_emulator_reorder() -> None:
@@ -67,18 +191,14 @@ def run_emulator_reorder() -> None:
         if not path.is_file():
             continue
         try:
-            subprocess.run([str(path)], timeout=30,
+            cmd = [str(path)]
+            if path.suffix == ".py":
+                cmd = ["python3", str(path)]
+            subprocess.run(cmd, timeout=30,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             logger.info("emulator reorder applied (%s)", path.name)
         except Exception as exc:  # noqa: BLE001
             logger.debug("reorder hook %s failed: %s", path.name, exc)
-
-
-def prepare_bluez(mac: str = "", *, remove: bool = False) -> None:
-    prepare_bluez_global()
-    if remove and mac:
-        subprocess.run(["bluetoothctl", "remove", mac],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 class _ConnectHub:
@@ -129,12 +249,6 @@ class _ConnectHub:
                 time.sleep(1)
 
     async def _scan_loop(self) -> None:
-        """Alternate short scan bursts with scan-off connect windows.
-
-        Raw L2CAP fails while the adapter is scanning (SO_ERROR 38). We collect
-        adverts during a brief scan, stop completely, then connect inline before
-        restarting scan — no btmgmt (it hangs on some adapters).
-        """
         hub = self
         hub._loop = asyncio.get_running_loop()
         hub._connect_lock = asyncio.Lock()
@@ -142,8 +256,7 @@ class _ConnectHub:
             hub._executor = concurrent.futures.ThreadPoolExecutor(
                 max_workers=2, thread_name_prefix="ngc-connect"
             )
-        scan_on_s = 0.22  # unused when connected; kept for tuning reference
-        seen_ttl_s = 3.0
+        seen_ttl_s = 4.0
 
         def on_adv(device, adv) -> None:
             addr = device.address.upper()
@@ -157,7 +270,7 @@ class _ConnectHub:
                 logger.info("saw %s (%s)", addr, mode)
 
         hub._scanner = BleakScanner(detection_callback=on_adv)
-        logger.info("scanning for configured controllers (hold Sync to connect)")
+        logger.info("scanning for configured controllers (press a button or hold Sync)")
         try:
             while not hub.stop.is_set():
                 workers = list(hub.workers_by_mac.values())
@@ -169,10 +282,10 @@ class _ConnectHub:
 
                 connected_count = len(workers) - len(disconnected)
                 if connected_count:
-                    # Scanning while a pad is linked often drops the live L2CAP session.
-                    await asyncio.sleep(2.0)
+                    # Scanning while a pad is linked can drop the live session; brief pause.
+                    await asyncio.sleep(1.0)
 
-                scan_on_s = 0.10 if connected_count else 0.22
+                scan_on_s = 0.12 if connected_count else 0.25
                 hub._scanning = True
                 await hub._scanner.start()
                 try:
@@ -195,7 +308,13 @@ class _ConnectHub:
                     reverse=True,
                 )
                 if pending:
+                    # Clear Steam's LE scan and drop BlueZ Device ghosts before dialing.
                     prepare_bluez_global()
+                    for mac in pending:
+                        worker = hub.workers_by_mac.get(mac)
+                        if worker is not None and not worker.is_connected():
+                            _bluez_remove_device(mac)
+                    await asyncio.sleep(0.08)
                 async with hub._connect_lock:
                     for mac in pending:
                         worker = hub.workers_by_mac.get(mac)
@@ -215,7 +334,8 @@ class _ConnectHub:
                             hub._last_seen.pop(mac, None)
                             hub._logged.discard(mac)
                         else:
-                            logger.debug("connect to %s (%s) failed (%s)", mac, mode, detail)
+                            logger.info("connect to %s (%s) failed (%s)", mac, mode, detail)
+                            _force_le_scan_off(force=True)
 
                 for mac, (seen_at, _) in list(hub._last_seen.items()):
                     if now - seen_at > seen_ttl_s:
@@ -236,29 +356,39 @@ class _ConnectHub:
         if not adapter:
             return False, "no adapter configured"
         with _CONNECT_LOCK:
+            _force_le_scan_off()
             last_detail = "no attempts"
-            for _ in range(24):
+            for attempt in range(_CONNECT_ATTEMPTS):
+                if attempt and attempt % 4 == 0:
+                    _force_le_scan_off()
                 ctrl = SwitchController(mac, adapter)
                 for dst in (att.LE_PUBLIC, att.LE_RANDOM):
-                    ok, detail = ctrl.att._connect_once(dst, 0.12)
+                    ok, detail = ctrl.att._connect_once(dst, _CONNECT_ATTEMPT_S)
                     if ok:
                         ctrl.att.dst_type = dst
                         if worker.activate(ctrl):
+                            worker._ready.set()
                             return True, "ok"
                         ctrl.close()
                         return False, "session setup failed"
                     last_detail = detail
                 ctrl.close()
-                time.sleep(0.008)
+                time.sleep(0.02)
             return False, last_detail
 
 
 class _Worker:
-    """Owns input streaming and rumble for one controller session."""
+    """Owns input streaming, rumble, and virtual gamepad for one controller session."""
 
-    def __init__(self, entry: ControllerEntry, config: Config, stop: threading.Event,
-                 hub: _ConnectHub, dsu: Optional[DSUServer] = None,
-                 on_topology_change: Optional[callable] = None):
+    def __init__(
+        self,
+        entry: ControllerEntry,
+        config: Config,
+        stop: threading.Event,
+        hub: _ConnectHub,
+        dsu: Optional[DSUServer] = None,
+        on_topology_change: Optional[callable] = None,
+    ):
         self.entry = entry
         self.config = config
         self._stop = stop
@@ -267,17 +397,27 @@ class _Worker:
         self.on_topology_change = on_topology_change
         self.slot = max(0, min(3, entry.player - 1))
         self.gamepad: Optional[SwitchGamepad] = None
+        self.motion: Optional[MotionEvdev] = None
+        self._gamepad_product: Optional[int] = None
         self.controller: Optional[SwitchController] = None
         self._disconnected = threading.Event()
         self._ready = threading.Event()
+        self._led_player: Optional[int] = None
 
     def is_connected(self) -> bool:
         return self.controller is not None and self.controller.is_connected
+
+    def effective_player(self) -> int:
+        """Config player slot, optionally overridden by led-players.json."""
+        override = _led_override_for(self.entry.mac)
+        return override if override is not None else self.entry.player
 
     def _on_input(self, ctrl: SwitchController, report: P.InputReport) -> None:
         (lx, ly), (rx, ry), lt, rt = ctrl.calibrated_input(report)
         if self.gamepad is not None:
             self.gamepad.update(report.buttons, (lx, ly), (rx, ry), lt, rt)
+        if self.motion is not None:
+            self.motion.update(report)
         if self.dsu is not None:
             sticks = (_stick_to_dsu(lx), _stick_to_dsu(ly),
                       _stick_to_dsu(rx), _stick_to_dsu(ry))
@@ -297,22 +437,34 @@ class _Worker:
             logger.debug("rumble failed: %s", exc)
 
     def _ensure_gamepad(self, ctrl: SwitchController) -> None:
-        if self.gamepad is not None:
+        pid = ctrl.product_id
+        if self.gamepad is not None and self._gamepad_product == pid:
             return
+        if self.gamepad is not None:
+            self.gamepad.rumble_cb = None
+            self.gamepad.close()
+            self.gamepad = None
+            self._gamepad_product = None
+        if self.motion is not None:
+            self.motion.close()
+            self.motion = None
         name = f"{ctrl.name} (P{self.entry.player})"
         self.gamepad = SwitchGamepad(
             name=name,
-            button_map=self.config_button_map(),
-            product=ctrl.product_id,
+            button_map=self.config_button_map(pid),
+            product=pid,
+            mac=self.entry.mac,
         )
+        self.motion = MotionEvdev(name, self.entry.mac, product=pid)
+        self._gamepad_product = pid
         logger.info("virtual gamepad ready: %s", name)
 
-    def config_button_map(self):
-        from .gamepad import DEFAULT_BUTTON_MAP
+    def config_button_map(self, product_id: int):
+        from .gamepad import button_map_for_product
         from evdev import ecodes as e
 
         if not self.config.button_map:
-            return DEFAULT_BUTTON_MAP
+            return button_map_for_product(product_id)
         resolved = {}
         for switch_name, code in self.config.button_map.items():
             resolved[switch_name] = getattr(e, code) if isinstance(code, str) else code
@@ -325,7 +477,9 @@ class _Worker:
             ctrl.input_callback = self._on_input
             ctrl.disconnect_callback = self._on_disconnect
             self._disconnected.clear()
-            ctrl.initialize(player=self.entry.player)
+            player = self.effective_player()
+            ctrl.initialize(player=player)
+            self._led_player = player
             if not self.entry.bonded:
                 ctrl.bond()
                 self.config.mark_bonded(mac, True)
@@ -340,7 +494,6 @@ class _Worker:
                 self.dsu.set_slot(self.slot, True, mac=mac, battery_mv=ctrl.battery_mv or 0)
             if self.on_topology_change is not None:
                 self.on_topology_change()
-            self._ready.set()
             if self.hub.bridge is not None:
                 self.hub.bridge._publish_state()
             return True
@@ -359,6 +512,10 @@ class _Worker:
             self.gamepad.rumble_cb = None
             self.gamepad.close()
             self.gamepad = None
+            self._gamepad_product = None
+        if self.motion is not None:
+            self.motion.close()
+            self.motion = None
 
     def _teardown_session(self, *, full: bool = False) -> None:
         if self.gamepad is not None:
@@ -366,8 +523,13 @@ class _Worker:
             if full:
                 self.gamepad.close()
                 self.gamepad = None
+                self._gamepad_product = None
             else:
                 self.gamepad.release_all()
+        if self.motion is not None:
+            if full:
+                self.motion.close()
+                self.motion = None
         if self.dsu is not None:
             self.dsu.set_slot(self.slot, False)
         if self.controller:
@@ -382,7 +544,6 @@ class _Worker:
         self.hub.register(self)
         while not self._stop.is_set():
             self._ready.clear()
-            logger.info("%s waiting — hold Sync to connect", self.entry.mac)
             while not self._stop.is_set() and not self._ready.wait(1.0):
                 pass
             if self._stop.is_set() or not self.is_connected():
@@ -393,9 +554,6 @@ class _Worker:
 
     def cleanup(self) -> None:
         self._teardown_session(full=True)
-        if self.gamepad:
-            self.gamepad.close()
-            self.gamepad = None
 
 
 class Bridge:
@@ -412,7 +570,6 @@ class Bridge:
     def _battery_pct(self, mv: Optional[int]) -> Optional[int]:
         if not mv:
             return None
-        # Rough Switch-style mapping (3300–4200 mV).
         return max(0, min(100, int((mv - 3300) * 100 / 900)))
 
     def _publish_state(self) -> None:
@@ -421,7 +578,10 @@ class Bridge:
         with self._state_lock:
             controllers: list[ControllerState] = []
             for entry in entries:
-                worker = next((w for w in self.workers if w.entry.mac.upper() == entry.mac.upper()), None)
+                worker = next(
+                    (w for w in self.workers if w.entry.mac.upper() == entry.mac.upper()),
+                    None,
+                )
                 ctrl = worker.controller if worker else None
                 mv = ctrl.battery_mv if ctrl else None
                 controllers.append(
@@ -448,9 +608,13 @@ class Bridge:
                 headline = f"{connected} connected"
                 detail = f"{names} — ready in Steam and emulators"
                 service = "running"
+            elif self.hub._scanning:
+                headline = "Scanning"
+                detail = "Press a button or hold Sync on a saved controller."
+                service = "running"
             else:
                 headline = "Ready"
-                detail = "Hold Sync on a saved controller to connect."
+                detail = "Press a button or hold Sync on a saved controller."
                 service = "running"
             write_state(
                 BridgeState(
@@ -464,9 +628,29 @@ class Bridge:
                 )
             )
 
+    def _apply_led_overrides(self) -> None:
+        """Push led-players.json slots onto connected bridge pads."""
+        mapping = _read_led_players()
+        if not mapping:
+            return
+        for worker in self.workers:
+            ctrl = worker.controller
+            if ctrl is None or not ctrl.is_connected:
+                continue
+            player = mapping.get(worker.entry.mac.upper())
+            if player is None or worker._led_player == player:
+                continue
+            try:
+                ctrl.set_player_leds(player)
+                worker._led_player = player
+                logger.info("player LEDs %s -> P%d (led-players.json)", worker.entry.mac, player)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("player LED update failed for %s: %s", worker.entry.mac, exc)
+
     def _state_loop(self) -> None:
         while not self._stop.wait(_STATUS_INTERVAL_S):
             try:
+                self._apply_led_overrides()
                 self._publish_state()
             except Exception as exc:  # noqa: BLE001
                 logger.debug("state publish failed: %s", exc)
@@ -497,8 +681,14 @@ class Bridge:
         threading.Thread(target=self._state_loop, name="ngc-state", daemon=True).start()
         logger.info("starting %d controller worker(s)", len(entries))
         for entry in entries:
-            worker = _Worker(entry, self.config, self._stop, self.hub, dsu=self.dsu,
-                             on_topology_change=self._schedule_reorder)
+            worker = _Worker(
+                entry,
+                self.config,
+                self._stop,
+                self.hub,
+                dsu=self.dsu,
+                on_topology_change=self._schedule_reorder,
+            )
             self.workers.append(worker)
             threading.Thread(target=worker.run, name=f"ctrl-{entry.player}", daemon=True).start()
 
@@ -518,3 +708,21 @@ class Bridge:
 
     def stop(self) -> None:
         self._stop.set()
+
+    def pulse_gamecube_hotkey(self, *switch_names: str, hold_s: float = 0.12) -> None:
+        """Briefly press mapped buttons on connected GameCube pads (e.g. C+R for Dolphin save)."""
+        masks = 0
+        for name in switch_names:
+            masks |= P.SWITCH_BUTTONS.get(name, 0)
+        if not masks:
+            return
+        for worker in self.workers:
+            gp = worker.gamepad
+            ctrl = worker.controller
+            if gp is None or ctrl is None or not worker.is_connected():
+                continue
+            if ctrl.product_id != P.NSO_GAMECUBE_PID:
+                continue
+            gp.update(masks, (0.0, 0.0), (0.0, 0.0), 0, 0)
+            time.sleep(hold_s)
+            gp.update(0, (0.0, 0.0), (0.0, 0.0), 0, 0)

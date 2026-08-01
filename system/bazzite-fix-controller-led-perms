@@ -1,0 +1,7 @@
+#!/bin/bash
+# Make DualSense / Switch Pro / N64 player LEDs writable.
+shopt -s nullglob
+for d in /sys/class/leds/*:player-* /sys/class/leds/*:rgb:indicator; do
+  [[ -f "$d/brightness" ]] && chmod a+w "$d/brightness"
+  [[ -f "$d/multi_intensity" ]] && chmod a+w "$d/multi_intensity"
+done

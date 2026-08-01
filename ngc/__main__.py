@@ -161,8 +161,16 @@ def _run(cfg: Config) -> int:
     def _sig(_signum, _frame):
         bridge.stop()
 
+    def _usr1(_signum, _frame):
+        # Dolphin: Save to Selected Slot = Back + Shoulder R (C + R on ngc GC pad).
+        try:
+            bridge.pulse_gamecube_hotkey("C", "R")
+        except Exception as exc:  # noqa: BLE001
+            logging.getLogger(__name__).warning("hotkey pulse failed: %s", exc)
+
     signal.signal(signal.SIGINT, _sig)
     signal.signal(signal.SIGTERM, _sig)
+    signal.signal(signal.SIGUSR1, _usr1)
     bridge.run()
     return 0
 
