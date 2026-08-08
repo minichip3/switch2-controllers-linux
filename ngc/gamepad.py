@@ -139,14 +139,21 @@ JOYCON2_RIGHT_BUTTON_MAP = {
     "GR": e.BTN_C,
 }
 
-# Solo Left Joy-Con: L/ZL are its own; SL_L/SR_L fill the R/ZR shoulder slots.
-# UP/DOWN/LEFT/RIGHT are its only face-like buttons and already become the
-# D-pad hat in SwitchGamepad.update(), so they're not listed here.
+# Solo Left Joy-Con: per SDL's HandleMiniControllerStateL (same source as the
+# right-side reference above), a lone Left Joy-Con has no real D-pad -- the
+# four direction buttons stand in for the ABXY diamond (DOWN=east, UP=west,
+# RIGHT=north, LEFT=south), SR_L/SL_L are the shoulders, and L/ZL are the
+# "paddle" type like R/ZR on the right side. This product does NOT use the
+# D-pad hat in SwitchGamepad.update() -- see the JOYCON2_LEFT_PID check there.
 JOYCON2_LEFT_BUTTON_MAP = {
-    "L": e.BTN_TL,
-    "ZL": e.BTN_TL2,
-    "SL_L": e.BTN_TR,
-    "SR_L": e.BTN_TR2,
+    "DOWN": e.BTN_EAST,
+    "UP": e.BTN_WEST,
+    "RIGHT": e.BTN_NORTH,
+    "LEFT": e.BTN_SOUTH,
+    "SR_L": e.BTN_TR,           # RIGHT_SHOULDER
+    "SL_L": e.BTN_TL,           # LEFT_SHOULDER
+    "L": e.BTN_TRIGGER_HAPPY1,  # LEFT_PADDLE1
+    "ZL": e.BTN_TRIGGER_HAPPY2, # LEFT_PADDLE2
     "MINUS": e.BTN_SELECT,
     "CAPTURE": e.BTN_Z,
     "L_STK": e.BTN_THUMBL,
@@ -199,10 +206,11 @@ class SwitchGamepad:
         # field at all for it if the axis isn't declared.
         abs_caps.append((e.ABS_Z, AbsInfo(0, TRIGGER_MIN, TRIGGER_MAX, 0, 0, 0)))
         abs_caps.append((e.ABS_RZ, AbsInfo(0, TRIGGER_MIN, TRIGGER_MAX, 0, 0, 0)))
-        abs_caps += [
-            (e.ABS_HAT0X, AbsInfo(0, -1, 1, 0, 0, 0)),
-            (e.ABS_HAT0Y, AbsInfo(0, -1, 1, 0, 0, 0)),
-        ]
+        if not self.single_stick:
+            abs_caps += [
+                (e.ABS_HAT0X, AbsInfo(0, -1, 1, 0, 0, 0)),
+                (e.ABS_HAT0Y, AbsInfo(0, -1, 1, 0, 0, 0)),
+            ]
 
         capabilities = {
             e.EV_KEY: keys,
@@ -270,14 +278,20 @@ class SwitchGamepad:
         for key_code, pressed in key_states.items():
             changed |= self._emit_key(key_code, pressed)
 
-        dpad_x = (1 if buttons & P.SWITCH_BUTTONS["RIGHT"] else 0) - (
-            1 if buttons & P.SWITCH_BUTTONS["LEFT"] else 0
-        )
-        dpad_y = (1 if buttons & P.SWITCH_BUTTONS["DOWN"] else 0) - (
-            1 if buttons & P.SWITCH_BUTTONS["UP"] else 0
-        )
-        changed |= self._emit_abs(e.ABS_HAT0X, dpad_x)
-        changed |= self._emit_abs(e.ABS_HAT0Y, dpad_y)
+        if not self.single_stick:
+            # Solo Joy-Con UP/DOWN/LEFT/RIGHT aren't a real D-pad -- on the
+            # Left side they're repurposed as face buttons (see
+            # JOYCON2_LEFT_BUTTON_MAP) and the Right side doesn't have them
+            # at all, so emitting a hat here too would just double-signal
+            # the same bits under two different axes.
+            dpad_x = (1 if buttons & P.SWITCH_BUTTONS["RIGHT"] else 0) - (
+                1 if buttons & P.SWITCH_BUTTONS["LEFT"] else 0
+            )
+            dpad_y = (1 if buttons & P.SWITCH_BUTTONS["DOWN"] else 0) - (
+                1 if buttons & P.SWITCH_BUTTONS["UP"] else 0
+            )
+            changed |= self._emit_abs(e.ABS_HAT0X, dpad_x)
+            changed |= self._emit_abs(e.ABS_HAT0Y, dpad_y)
 
         changed |= self._emit_abs(e.ABS_X, self._scale_stick(left_stick[0]))
         changed |= self._emit_abs(e.ABS_Y, -self._scale_stick(left_stick[1]))
@@ -297,9 +311,9 @@ class SwitchGamepad:
         changed = False
         for code in list(self._last_keys):
             changed |= self._emit_key(code, 0)
-        neutral_codes = [e.ABS_X, e.ABS_Y, e.ABS_Z, e.ABS_RZ, e.ABS_HAT0X, e.ABS_HAT0Y]
+        neutral_codes = [e.ABS_X, e.ABS_Y, e.ABS_Z, e.ABS_RZ]
         if not self.single_stick:
-            neutral_codes += [e.ABS_RX, e.ABS_RY]
+            neutral_codes += [e.ABS_RX, e.ABS_RY, e.ABS_HAT0X, e.ABS_HAT0Y]
         for code in neutral_codes:
             changed |= self._emit_abs(code, 0)
         if changed:
