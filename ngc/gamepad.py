@@ -190,9 +190,12 @@ class SwitchGamepad:
                 (e.ABS_RX, AbsInfo(0, STICK_MIN, STICK_MAX, 0, 0, 0)),
                 (e.ABS_RY, AbsInfo(0, STICK_MIN, STICK_MAX, 0, 0, 0)),
             ]
+        # Both trigger axes are always declared, even for single-stick Joy-Con
+        # products with only one real trigger: Steam's device-details screen
+        # reads a Joy-Con's ZR status from ABS_RZ specifically and shows no
+        # field at all for it if the axis isn't declared.
         abs_caps.append((e.ABS_Z, AbsInfo(0, TRIGGER_MIN, TRIGGER_MAX, 0, 0, 0)))
-        if not self.single_stick:
-            abs_caps.append((e.ABS_RZ, AbsInfo(0, TRIGGER_MIN, TRIGGER_MAX, 0, 0, 0)))
+        abs_caps.append((e.ABS_RZ, AbsInfo(0, TRIGGER_MIN, TRIGGER_MAX, 0, 0, 0)))
         abs_caps += [
             (e.ABS_HAT0X, AbsInfo(0, -1, 1, 0, 0, 0)),
             (e.ABS_HAT0Y, AbsInfo(0, -1, 1, 0, 0, 0)),
@@ -275,17 +278,14 @@ class SwitchGamepad:
 
         changed |= self._emit_abs(e.ABS_X, self._scale_stick(left_stick[0]))
         changed |= self._emit_abs(e.ABS_Y, -self._scale_stick(left_stick[1]))
-        if self.single_stick:
-            # Only one physical trigger exists; route whichever side is real
-            # onto the sole ABS_Z axis (device.calibrated_input already routes
-            # the sole stick onto left_stick for both Joy-Con sides).
-            primary_trigger = right_trigger if self.product == P.JOYCON2_RIGHT_PID else left_trigger
-            changed |= self._emit_abs(e.ABS_Z, max(0, min(255, primary_trigger)))
-        else:
+        if not self.single_stick:
             changed |= self._emit_abs(e.ABS_RX, self._scale_stick(right_stick[0]))
             changed |= self._emit_abs(e.ABS_RY, -self._scale_stick(right_stick[1]))
-            changed |= self._emit_abs(e.ABS_Z, max(0, min(255, left_trigger)))
-            changed |= self._emit_abs(e.ABS_RZ, max(0, min(255, right_trigger)))
+        # Triggers keep their own natural side (ZL->Z, ZR->RZ) even for
+        # single-stick Joy-Con products -- unlike the stick, which is
+        # deliberately re-routed to "primary/left" in device.calibrated_input.
+        changed |= self._emit_abs(e.ABS_Z, max(0, min(255, left_trigger)))
+        changed |= self._emit_abs(e.ABS_RZ, max(0, min(255, right_trigger)))
 
         if changed:
             self.ui.syn()
@@ -294,9 +294,9 @@ class SwitchGamepad:
         changed = False
         for code in list(self._last_keys):
             changed |= self._emit_key(code, 0)
-        neutral_codes = [e.ABS_X, e.ABS_Y, e.ABS_Z, e.ABS_HAT0X, e.ABS_HAT0Y]
+        neutral_codes = [e.ABS_X, e.ABS_Y, e.ABS_Z, e.ABS_RZ, e.ABS_HAT0X, e.ABS_HAT0Y]
         if not self.single_stick:
-            neutral_codes += [e.ABS_RX, e.ABS_RY, e.ABS_RZ]
+            neutral_codes += [e.ABS_RX, e.ABS_RY]
         for code in neutral_codes:
             changed |= self._emit_abs(code, 0)
         if changed:
