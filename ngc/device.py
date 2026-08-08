@@ -92,6 +92,14 @@ class SwitchController:
         return P.has_analog_triggers(self.product_id)
 
     @property
+    def is_joycon_left(self) -> bool:
+        return self.product_id == P.JOYCON2_LEFT_PID
+
+    @property
+    def is_joycon_right(self) -> bool:
+        return self.product_id == P.JOYCON2_RIGHT_PID
+
+    @property
     def name(self) -> str:
         return self.info.name if self.info else "Switch 2 Controller"
 
@@ -410,6 +418,11 @@ class SwitchController:
         """Return (left_xy, right_xy floats, lt, rt 0-255) from a report."""
         lx, ly = self.left_calib.apply(report.left_stick_raw) if self.left_calib else (0.0, 0.0)
         rx, ry = self.right_calib.apply(report.right_stick_raw) if self.right_calib else (0.0, 0.0)
+        if self.is_joycon_right:
+            # A lone Right Joy-Con has exactly one physical stick. Present it as
+            # the primary (left) analog stick so it behaves like a normal
+            # single-stick pad instead of a two-stick pad missing its left side.
+            (lx, ly), (rx, ry) = (rx, ry), (0.0, 0.0)
         if self.has_analog_triggers:
             lt = P.normalize_trigger(report.left_trigger_raw, self.trigger_neutral[0])
             rt = P.normalize_trigger(report.right_trigger_raw, self.trigger_neutral[1])

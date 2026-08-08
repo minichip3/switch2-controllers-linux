@@ -43,6 +43,16 @@ TRIGGER_MIN, TRIGGER_MAX = 0, 255
 #
 # NSO GameCube has Start (PLUS bit) and Home (HOME bit), no Select/MINUS.
 # Capture/C need misc slots in gamecontrollerdb.
+#
+# A lone Joy-Con 2 only has half the buttons of a full pad and was previously
+# reusing PRO_BUTTON_MAP wholesale (phantom keys for buttons that don't exist,
+# and none of its own SL/SR/GL/GR rail buttons). JOYCON2_LEFT/RIGHT_BUTTON_MAP
+# below mirror the upstream Linux kernel's hid-nintendo.c solo-Joy-Con tables
+# (left_joycon_button_mappings / right_joycon_button_mappings): the unused
+# opposite-side shoulder slot is reused for SL/SR so a single Joy-Con still
+# exposes two "shoulder" buttons. GL/GR (Switch 2's new rail buttons, absent
+# from the Switch 1 driver) go to BTN_C, same slot the GameCube map uses for
+# its extra C button.
 # --------------------------------------------------------------------------- #
 
 PRO_BUTTON_MAP = {
@@ -82,13 +92,54 @@ GAMECUBE_BUTTON_MAP = {
     "R_STK": e.BTN_THUMBR,
 }
 
+# Solo Right Joy-Con: A/B/X/Y + R/ZR are its own; SL_R/SR_R (the rail buttons
+# facing the missing left half) fill the L/ZL shoulder slots. Its one stick is
+# presented as the primary stick by device.calibrated_input(), so the stick
+# click lands on THUMBL (left-stick click), not THUMBR.
+JOYCON2_RIGHT_BUTTON_MAP = {
+    "A": e.BTN_EAST,
+    "B": e.BTN_SOUTH,
+    "X": e.BTN_NORTH,
+    "Y": e.BTN_WEST,
+    "R": e.BTN_TR,
+    "ZR": e.BTN_TR2,
+    "SL_R": e.BTN_TL,
+    "SR_R": e.BTN_TL2,
+    "PLUS": e.BTN_START,
+    "HOME": e.BTN_MODE,
+    "R_STK": e.BTN_THUMBL,
+    "GR": e.BTN_C,
+}
+
+# Solo Left Joy-Con: L/ZL are its own; SL_L/SR_L fill the R/ZR shoulder slots.
+# UP/DOWN/LEFT/RIGHT are its only face-like buttons and already become the
+# D-pad hat in SwitchGamepad.update(), so they're not listed here.
+JOYCON2_LEFT_BUTTON_MAP = {
+    "L": e.BTN_TL,
+    "ZL": e.BTN_TL2,
+    "SL_L": e.BTN_TR,
+    "SR_L": e.BTN_TR2,
+    "MINUS": e.BTN_SELECT,
+    "CAPTURE": e.BTN_Z,
+    "L_STK": e.BTN_THUMBL,
+    "GL": e.BTN_C,
+}
+
 DEFAULT_BUTTON_MAP = PRO_BUTTON_MAP
+
+# Joy-Con 2 (either side) presents a single physical stick/trigger; the
+# uinput device drops the unused RX/RY/RZ axes accordingly (see SwitchGamepad).
+SINGLE_STICK_PIDS = {P.JOYCON2_LEFT_PID, P.JOYCON2_RIGHT_PID}
 
 
 def button_map_for_product(product_id: int) -> dict:
     """Return the default evdev map for a Switch 2 controller PID."""
     if product_id == P.NSO_GAMECUBE_PID:
         return GAMECUBE_BUTTON_MAP
+    if product_id == P.JOYCON2_LEFT_PID:
+        return JOYCON2_LEFT_BUTTON_MAP
+    if product_id == P.JOYCON2_RIGHT_PID:
+        return JOYCON2_RIGHT_BUTTON_MAP
     return PRO_BUTTON_MAP
 
 
@@ -101,20 +152,30 @@ class SwitchGamepad:
         mac: str = "",
     ):
         self.button_map = button_map or DEFAULT_BUTTON_MAP
+        self.product = product
+        self.single_stick = product in SINGLE_STICK_PIDS
         keys = sorted(set(self.button_map.values()))
+
+        abs_caps = [
+            (e.ABS_X, AbsInfo(0, STICK_MIN, STICK_MAX, 0, 0, 0)),
+            (e.ABS_Y, AbsInfo(0, STICK_MIN, STICK_MAX, 0, 0, 0)),
+        ]
+        if not self.single_stick:
+            abs_caps += [
+                (e.ABS_RX, AbsInfo(0, STICK_MIN, STICK_MAX, 0, 0, 0)),
+                (e.ABS_RY, AbsInfo(0, STICK_MIN, STICK_MAX, 0, 0, 0)),
+            ]
+        abs_caps.append((e.ABS_Z, AbsInfo(0, TRIGGER_MIN, TRIGGER_MAX, 0, 0, 0)))
+        if not self.single_stick:
+            abs_caps.append((e.ABS_RZ, AbsInfo(0, TRIGGER_MIN, TRIGGER_MAX, 0, 0, 0)))
+        abs_caps += [
+            (e.ABS_HAT0X, AbsInfo(0, -1, 1, 0, 0, 0)),
+            (e.ABS_HAT0Y, AbsInfo(0, -1, 1, 0, 0, 0)),
+        ]
 
         capabilities = {
             e.EV_KEY: keys,
-            e.EV_ABS: [
-                (e.ABS_X, AbsInfo(0, STICK_MIN, STICK_MAX, 0, 0, 0)),
-                (e.ABS_Y, AbsInfo(0, STICK_MIN, STICK_MAX, 0, 0, 0)),
-                (e.ABS_RX, AbsInfo(0, STICK_MIN, STICK_MAX, 0, 0, 0)),
-                (e.ABS_RY, AbsInfo(0, STICK_MIN, STICK_MAX, 0, 0, 0)),
-                (e.ABS_Z, AbsInfo(0, TRIGGER_MIN, TRIGGER_MAX, 0, 0, 0)),
-                (e.ABS_RZ, AbsInfo(0, TRIGGER_MIN, TRIGGER_MAX, 0, 0, 0)),
-                (e.ABS_HAT0X, AbsInfo(0, -1, 1, 0, 0, 0)),
-                (e.ABS_HAT0Y, AbsInfo(0, -1, 1, 0, 0, 0)),
-            ],
+            e.EV_ABS: abs_caps,
             e.EV_FF: [e.FF_RUMBLE, e.FF_PERIODIC, e.FF_CONSTANT, e.FF_GAIN],
         }
 
@@ -189,10 +250,17 @@ class SwitchGamepad:
 
         changed |= self._emit_abs(e.ABS_X, self._scale_stick(left_stick[0]))
         changed |= self._emit_abs(e.ABS_Y, -self._scale_stick(left_stick[1]))
-        changed |= self._emit_abs(e.ABS_RX, self._scale_stick(right_stick[0]))
-        changed |= self._emit_abs(e.ABS_RY, -self._scale_stick(right_stick[1]))
-        changed |= self._emit_abs(e.ABS_Z, max(0, min(255, left_trigger)))
-        changed |= self._emit_abs(e.ABS_RZ, max(0, min(255, right_trigger)))
+        if self.single_stick:
+            # Only one physical trigger exists; route whichever side is real
+            # onto the sole ABS_Z axis (device.calibrated_input already routes
+            # the sole stick onto left_stick for both Joy-Con sides).
+            primary_trigger = right_trigger if self.product == P.JOYCON2_RIGHT_PID else left_trigger
+            changed |= self._emit_abs(e.ABS_Z, max(0, min(255, primary_trigger)))
+        else:
+            changed |= self._emit_abs(e.ABS_RX, self._scale_stick(right_stick[0]))
+            changed |= self._emit_abs(e.ABS_RY, -self._scale_stick(right_stick[1]))
+            changed |= self._emit_abs(e.ABS_Z, max(0, min(255, left_trigger)))
+            changed |= self._emit_abs(e.ABS_RZ, max(0, min(255, right_trigger)))
 
         if changed:
             self.ui.syn()
@@ -201,17 +269,11 @@ class SwitchGamepad:
         changed = False
         for code in list(self._last_keys):
             changed |= self._emit_key(code, 0)
-        for code, neutral in (
-            (e.ABS_X, 0),
-            (e.ABS_Y, 0),
-            (e.ABS_RX, 0),
-            (e.ABS_RY, 0),
-            (e.ABS_Z, 0),
-            (e.ABS_RZ, 0),
-            (e.ABS_HAT0X, 0),
-            (e.ABS_HAT0Y, 0),
-        ):
-            changed |= self._emit_abs(code, neutral)
+        neutral_codes = [e.ABS_X, e.ABS_Y, e.ABS_Z, e.ABS_HAT0X, e.ABS_HAT0Y]
+        if not self.single_stick:
+            neutral_codes += [e.ABS_RX, e.ABS_RY, e.ABS_RZ]
+        for code in neutral_codes:
+            changed |= self._emit_abs(code, 0)
         if changed:
             self.ui.syn()
 

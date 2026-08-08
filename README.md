@@ -44,11 +44,14 @@ fully in user space — no kernel modules, no root.
 | Joy-Con 2 (L / R)     | ⚠️ untested   | ?       | ?      | ?             | ?            | ?    |
 
 > **Joy-Con 2 is untested.** The code defines their product IDs, accepts them in
-> the scanner, and has per-side vibration UUIDs, so they may connect — but this
-> has never been verified against real hardware. A single Joy-Con also needs its
-> own button/stick mapping and sideways orientation handling, which isn't
-> implemented yet (it currently reuses the full-controller layout). Treat
-> Joy-Con 2 as a starting point, not a working feature. Reports/PRs welcome.
+> the scanner, and has per-side vibration UUIDs, so they may connect. A solo
+> Joy-Con now gets its own button map (mirroring the upstream Linux kernel's
+> hid-nintendo.c solo-Joy-Con tables: SL/SR fill the missing shoulder slots,
+> GL/GR land on the extra C-button slot) and its single stick/trigger is
+> presented as the primary (left) axis instead of a phantom second stick — but
+> none of this has been verified against real hardware yet. Sideways-orientation
+> gyro handling also isn't implemented. Treat Joy-Con 2 as a starting point, not
+> a confirmed-working feature. Reports/PRs welcome.
 
 ## How it works
 
