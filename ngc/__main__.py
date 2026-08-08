@@ -138,16 +138,6 @@ def _remove(cfg: Config, mac: str) -> int:
     return 0
 
 
-def _dual(cfg: Config, enable: bool) -> int:
-    cfg.dual_mode = enable
-    cfg.save()
-    state = "on" if enable else "off"
-    print(f"Dual Joy-Con mode {state}. Restart the bridge to apply.")
-    if enable:
-        print("A connected Left+Right Joy-Con 2 pair will now merge into one combined pad.")
-    return 0
-
-
 def _swap(cfg: Config, player_a: int, player_b: int) -> int:
     ca = cfg.find_by_player(player_a)
     cb = cfg.find_by_player(player_b)
@@ -188,13 +178,12 @@ def _run(cfg: Config) -> int:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="ngc", description="Switch 2 controller bridge (GameCube / Pro Controller 2 / Joy-Con 2)")
     parser.add_argument("command", nargs="?", default="run",
-                        choices=["run", "pair", "rebond", "list", "remove", "swap", "dual"])
+                        choices=["run", "pair", "rebond", "list", "remove", "swap"])
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--timeout", type=float, default=30.0, help="pairing scan timeout")
     parser.add_argument("--mac", help="controller MAC (for remove)")
     parser.add_argument("--player", type=int, help="player slot 1-8 (for pair)")
     parser.add_argument("--players", nargs=2, type=int, metavar=("A", "B"), help="player slots to swap")
-    parser.add_argument("state", nargs="?", choices=["on", "off"], help="for: ngc dual on|off")
     args = parser.parse_args(argv)
     _setup_logging(args.verbose)
 
@@ -202,12 +191,6 @@ def main(argv=None) -> int:
 
     if args.command == "pair":
         return 0 if asyncio.run(_pair(cfg, args.timeout, args.player)) else 1
-
-    if args.command == "dual":
-        if args.state not in ("on", "off"):
-            print("Usage: ngc dual on|off")
-            return 1
-        return _dual(cfg, args.state == "on")
 
     if args.command == "rebond":
         return 0 if asyncio.run(_rebond(cfg, args.timeout)) else 1

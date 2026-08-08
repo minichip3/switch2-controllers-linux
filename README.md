@@ -126,26 +126,6 @@ and no Decky plugin needed.
 
 The wizard bonds the controller so it can reconnect without pairing mode again.
 
-### Dual mode — merge a Left+Right Joy-Con 2 pair into one pad
-
-Pair both halves normally (any player slots — it doesn't matter), then flip
-the switch:
-
-```bash
-python -m ngc pair          # pair the Left Joy-Con
-python -m ngc pair          # pair the Right Joy-Con
-python -m ngc dual on       # enable dual mode
-```
-
-With dual mode on, whichever Left+Right Joy-Con 2 pair connects gets merged
-into one full dual-stick virtual gamepad instead of two separate solo pads
-— buttons, both sticks, and rumble all work as one controller, same as
-attaching them to a Nintendo Switch. Connection order doesn't matter, and
-each half still connects/reconnects independently; if one drops, the
-combined pad just loses that half's inputs until it reconnects.
-`python -m ngc dual off` reverts to two separate solo pads. This is new and
-only lightly tested — report issues.
-
 ### Every day — wake and play
 
 1. Make sure the background service is running (setup enables it):
