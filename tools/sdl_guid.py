@@ -193,29 +193,31 @@ JOYCON2_LEFT_AXES = (
 def fix_joycon_right_mapping(mapping: str) -> str:
     """Build a complete gamecontrollerdb line for a solo Right Joy-Con 2.
 
-    Matches ngc/gamepad.py's JOYCON2_RIGHT_BUTTON_MAP evdev-code sort order.
-    SL_R/SR_R (the rail buttons standing in for the missing left half) reuse
-    the otherwise-unused leftshoulder/lefttrigger button slots; GR (the new
-    Switch 2 rail button) goes to misc2, same slot the GameCube map uses for
-    its extra C button. The stick/trigger are presented as primary (left).
+    Matches ngc/gamepad.py's JOYCON2_RIGHT_BUTTON_MAP evdev-code sort order,
+    which follows SDL's own HandleMiniControllerStateR (SDL_hidapi_switch.c,
+    Valve-contributed) for the SL/SR/R/ZR slots: SR_R=rightshoulder,
+    SL_R=leftshoulder, R/ZR are their own "paddle" type (no standard evdev
+    button code, hence BTN_TRIGGER_HAPPY1/2 -- sorted to the end, past GR).
     """
     parts = mapping.split(",")
     if len(parts) < 2:
         return mapping
     guid, name = parts[0], parts[1]
-    # b0=B b1=A b2=GR b3=X b4=Y b5=SL_R b6=R b7=SR_R b9=Plus b10=Home b11=stick
+    # b0=A b1=X b2=GR b3=B b4=Y b5=SL_R b6=SR_R b7=Plus b8=Home b9=stick
+    # b10=R(paddle1) b11=ZR(paddle2)
     buttons = [
-        "b:b0",
-        "a:b1",
+        "a:b0",
+        "x:b1",
         "misc2:b2",
-        "x:b3",
+        "b:b3",
         "y:b4",
         "leftshoulder:b5",
         "rightshoulder:b6",
-        "lefttrigger:b7",
-        "start:b9",
-        "guide:b10",
-        "leftstick:b11",
+        "start:b7",
+        "guide:b8",
+        "leftstick:b9",
+        "rightpaddle1:b10",
+        "rightpaddle2:b11",
     ]
     return ",".join([guid, name, *buttons, *JOYCON2_RIGHT_AXES])
 

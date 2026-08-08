@@ -104,16 +104,19 @@ GAMECUBE_BUTTON_MAP = {
 # Joy-Con-2-only key rotation here rather than touched in protocol.py.
 #
 # A raw -v trace confirmed R/SR_R fire their own correct bits (no hardware
-# quirk there). The earlier "R/ZR = paddle, SL/SR = shoulder" reference
-# that seemed to require the kernel driver's TL/TL2 vs TR/TR2 grouping
-# turned out to describe SDL's own competing native Joy-Con (Switch-1-only)
-# HIDAPI driver connecting to the same hardware in parallel -- not a
-# constraint from Steam. Steam's own simplified device-details diagram only
-# draws one extra shoulder tab per side (SL/SR); screenshots confirmed it
-# reads that tab from BTN_TR, not BTN_TL2, and has no indicator at all for
-# R/ZR specifically (so R/ZR not lighting anything there is expected, not
-# broken). SR_R therefore goes on BTN_TR so its tab lights correctly; R
-# moves off BTN_TR since nothing currently depends on it landing there.
+# quirk there).
+#
+# Ground truth for the R/ZR/SL/SR slots: SDL's own HandleMiniControllerStateR
+# (src/joystick/hidapi/SDL_hidapi_switch.c, "Code and logic contributed by
+# Valve Corporation") -- the solo-Right-Joy-Con handler -- maps the exact
+# same SWITCH_BUTTONS bit positions to:
+#   0x10 (SR_R) -> RIGHT_SHOULDER   0x20 (SL_R) -> LEFT_SHOULDER
+#   0x40 (R)    -> RIGHT_PADDLE1    0x80 (ZR)   -> RIGHT_PADDLE2
+# R/ZR are their own SDL_GAMEPAD_BUTTON_SWITCH_RIGHT_PADDLE* type, distinct
+# from shoulder/trigger -- that's why they never fit cleanly into the
+# TL/TL2/TR/TR2 quartet (already fully claimed by SL/SR/ABXY-adjacent use)
+# in earlier attempts. evdev's closest equivalent for "extra paddle button
+# with no standard slot" is BTN_TRIGGER_HAPPY1/2.
 #
 # The evdev targets use the kernel driver's Nintendo-position convention
 # (A=east, B=south, X=north, Y=west), NOT this project's usual Xbox-style
@@ -126,10 +129,10 @@ JOYCON2_RIGHT_BUTTON_MAP = {
     "B": e.BTN_NORTH,   # physical X fires the "B" bit
     "A": e.BTN_SOUTH,   # physical B fires the "A" bit
     "Y": e.BTN_WEST,
-    "SR_R": e.BTN_TR,   # Steam's shoulder tab reads BTN_TR, not BTN_TL2
-    "ZR": e.BTN_TR2,
-    "SL_R": e.BTN_TL,
-    "R": e.BTN_TL2,
+    "SR_R": e.BTN_TR,           # RIGHT_SHOULDER
+    "SL_R": e.BTN_TL,           # LEFT_SHOULDER
+    "R": e.BTN_TRIGGER_HAPPY1,  # RIGHT_PADDLE1
+    "ZR": e.BTN_TRIGGER_HAPPY2, # RIGHT_PADDLE2
     "PLUS": e.BTN_START,
     "HOME": e.BTN_MODE,
     "R_STK": e.BTN_THUMBL,
