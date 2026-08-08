@@ -166,13 +166,12 @@ JOYCON2_LEFT_BUTTON_MAP = {
     "SL_L": e.BTN_TL,
     "L": e.BTN_TL2,
     "ZL": e.BTN_TR2,
-    # joycon2cpp (TheFrano) -- a Switch-2-specific reference using the exact
-    # same protocol/byte layout as this project (verified: matching stick
-    # offsets and its landscape dpad-remap logic matches our own raw -v
-    # trace bit-for-bit) -- maps solo Left Joy-Con MINUS to DS4 Share
-    # (Select/Back), not Start. SDL's Switch-1-only HandleMiniControllerStateL
-    # said Start; trusting the Switch-2-specific source here instead.
-    "MINUS": e.BTN_SELECT,
+    # Trying BTN_START here (matching SDL's Switch-1-only
+    # HandleMiniControllerStateL) instead of BTN_SELECT (joycon2cpp's DS4
+    # Share) -- MINUS stopped responding after a Steam "input reset" with
+    # BTN_SELECT + BTN_MODE(CAPTURE) both present; testing whether pairing
+    # it with Start instead avoids whatever Steam-side state that triggers.
+    "MINUS": e.BTN_START,
     # BTN_MODE ("Guide"): the earlier mouse-pointer hijack (Steam's "hold
     # Guide + move stick" desktop feature) turned out to be caused by the
     # phantom always-zero ABS_RZ axis (now not declared for this product,
