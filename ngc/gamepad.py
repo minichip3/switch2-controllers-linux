@@ -173,12 +173,12 @@ JOYCON2_LEFT_BUTTON_MAP = {
     # (Select/Back), not Start. SDL's Switch-1-only HandleMiniControllerStateL
     # said Start; trusting the Switch-2-specific source here instead.
     "MINUS": e.BTN_SELECT,
-    # NOT BTN_MODE: Steam treats any BTN_MODE ("Guide") press + stick
-    # movement as its built-in "controller as mouse" desktop feature,
-    # which hijacked the stick and leaked bogus Right X/Y axis values into
-    # other apps (e.g. Dolphin) whenever CAPTURE was held. BTN_Z has no such
-    # special handling.
-    "CAPTURE": e.BTN_Z,
+    # BTN_MODE ("Guide"): the earlier mouse-pointer hijack (Steam's "hold
+    # Guide + move stick" desktop feature) turned out to be caused by the
+    # phantom always-zero ABS_RZ axis (now not declared for this product,
+    # see SwitchGamepad), not by BTN_MODE itself -- confirmed fixed with
+    # CAPTURE back on BTN_MODE.
+    "CAPTURE": e.BTN_MODE,
     "L_STK": e.BTN_THUMBL,
     "GL": e.BTN_C,
 }
