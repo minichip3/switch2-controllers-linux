@@ -46,6 +46,11 @@ class SwitchController:
         self.trigger_neutral = (P.GC_TRIGGER_DEFAULT_NEUTRAL, P.GC_TRIGGER_DEFAULT_NEUTRAL)
         self.battery_mv: Optional[int] = None
         self._joycon_stick_recentered = False
+        # Set by the bridge when this Joy-Con is paired with its other half
+        # into one combined virtual gamepad: skips the solo-mode-only stick
+        # rotation / primary-stick swap in calibrated_input(), since a paired
+        # Joy-Con is held upright with its stick in its natural position.
+        self.combined_mode = False
 
         # Resolved GATT handles (start with GameCube defaults, refined by discovery).
         self.h_input = DEFAULT_HANDLE_INPUT_REPORT
@@ -442,16 +447,19 @@ class SwitchController:
             self._track_joycon_stick(self.right_calib, report.right_stick_raw)
         lx, ly = self.left_calib.apply(report.left_stick_raw) if self.left_calib else (0.0, 0.0)
         rx, ry = self.right_calib.apply(report.right_stick_raw) if self.right_calib else (0.0, 0.0)
-        if self.is_joycon_left:
+        if self.is_joycon_left and not self.combined_mode:
             # A lone Left Joy-Con's stick is already the primary (left) one,
             # but rotated 90 degrees counter-clockwise relative to its
-            # reported x/y; correct that here.
+            # reported x/y; correct that here. Not needed when paired
+            # (upright grip, natural stick orientation).
             lx, ly = -ly, lx
-        if self.is_joycon_right:
+        if self.is_joycon_right and not self.combined_mode:
             # A lone Right Joy-Con has exactly one physical stick, reported via
             # right_stick_raw/right_calib (left_stick_raw is dead on hardware).
             # It's rotated 90 degrees clockwise relative to its reported x/y;
             # correct that before presenting it as the primary (left) stick.
+            # Not needed when paired (upright grip, stick already on the
+            # right, no left-slot substitution wanted).
             rx, ry = ry, -rx
             (lx, ly), (rx, ry) = (rx, ry), (0.0, 0.0)
         if self.has_analog_triggers:

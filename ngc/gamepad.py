@@ -184,6 +184,30 @@ JOYCON2_LEFT_BUTTON_MAP = {
 
 DEFAULT_BUTTON_MAP = PRO_BUTTON_MAP
 
+# A paired Left+Right Joy-Con 2 set, merged by the bridge into one full
+# dual-stick pad (see bridge._PairCoordinator). Both sticks are used in their
+# natural (upright) orientation -- no solo-mode rotation. ABXY keeps the
+# same hardware bit-rotation compensation as JOYCON2_RIGHT_BUTTON_MAP (it's
+# a property of this physical controller, independent of solo vs. paired
+# use). SL/SR/GL/GR have no function when paired like this on a real Switch
+# and are left unmapped.
+JOYCON2_COMBINED_BUTTON_MAP = {
+    "X": e.BTN_EAST,    # physical A fires the "X" bit
+    "B": e.BTN_NORTH,   # physical X fires the "B" bit
+    "A": e.BTN_SOUTH,   # physical B fires the "A" bit
+    "Y": e.BTN_WEST,
+    "L": e.BTN_TL,
+    "R": e.BTN_TR,
+    "ZL": e.BTN_TL2,
+    "ZR": e.BTN_TR2,
+    "PLUS": e.BTN_START,
+    "MINUS": e.BTN_SELECT,
+    "HOME": e.BTN_MODE,
+    "CAPTURE": e.BTN_Z,
+    "L_STK": e.BTN_THUMBL,
+    "R_STK": e.BTN_THUMBR,
+}
+
 # Joy-Con 2 (either side) presents a single physical stick; the uinput
 # device drops the unused RX/RY axes accordingly (see SwitchGamepad). Both
 # trigger axes (Z/RZ) and the D-pad hat are still declared even though only
