@@ -173,7 +173,12 @@ JOYCON2_LEFT_BUTTON_MAP = {
     # (Select/Back), not Start. SDL's Switch-1-only HandleMiniControllerStateL
     # said Start; trusting the Switch-2-specific source here instead.
     "MINUS": e.BTN_SELECT,
-    "CAPTURE": e.BTN_MODE,
+    # NOT BTN_MODE: Steam treats any BTN_MODE ("Guide") press + stick
+    # movement as its built-in "controller as mouse" desktop feature,
+    # which hijacked the stick and leaked bogus Right X/Y axis values into
+    # other apps (e.g. Dolphin) whenever CAPTURE was held. BTN_Z has no such
+    # special handling.
+    "CAPTURE": e.BTN_Z,
     "L_STK": e.BTN_THUMBL,
     "GL": e.BTN_C,
 }
