@@ -419,13 +419,13 @@ class SwitchController:
         lx, ly = self.left_calib.apply(report.left_stick_raw) if self.left_calib else (0.0, 0.0)
         rx, ry = self.right_calib.apply(report.right_stick_raw) if self.right_calib else (0.0, 0.0)
         if self.is_joycon_right:
-            # A lone Right Joy-Con has exactly one physical stick, but hardware
-            # testing showed it's reported through the "stick 1" (left) report
-            # field/calibration regardless of side — report.right_stick_raw and
-            # right_calib are not populated for this controller and produce a
-            # bogus off-center reading. Use the (already correct) left reading
-            # as the primary stick and ignore the phantom right one.
-            rx, ry = 0.0, 0.0
+            # A lone Right Joy-Con has exactly one physical stick, reported via
+            # right_stick_raw/right_calib (using left_stick_raw here went dead
+            # entirely on hardware, so that field is not it). Still shows a
+            # constant off-center reading — likely a bad calibration read, not
+            # a wrong raw field; needs a raw -v trace to pin down further.
+            # Present it as the primary (left) stick either way.
+            (lx, ly), (rx, ry) = (rx, ry), (0.0, 0.0)
         if self.has_analog_triggers:
             lt = P.normalize_trigger(report.left_trigger_raw, self.trigger_neutral[0])
             rt = P.normalize_trigger(report.right_trigger_raw, self.trigger_neutral[1])
