@@ -103,10 +103,16 @@ GAMECUBE_BUTTON_MAP = {
 # the "A" bit (Y is unaffected). GC/Pro don't show this, so it's kept as a
 # Joy-Con-2-only key rotation here rather than touched in protocol.py.
 #
-# R/SR_R (kernel convention below) looked swapped in one Steam test and
-# swapping them just moved the problem from one button to the other instead
-# of fixing it -- needs a raw -v trace (press R alone, then SR alone) before
-# touching this pair again.
+# A raw -v trace confirmed R/SR_R fire their own correct bits (no hardware
+# quirk there) -- Steam's earlier "R shows as SR" was Steam's own display
+# quirk, not something to fix here.
+#
+# ZR's discrete button and its trigger axis (single_stick's sole ABS_Z, see
+# SwitchGamepad) must land on the same "side" or apps that show fixed names
+# for the two independently (e.g. Dolphin: axis a2 = "Trigger L" by slot
+# convention, buttons get their own fixed name) show ZR as both "Trigger L"
+# and "Trigger R" firing together. ZR uses BTN_TL2 ("Trigger L") to match its
+# axis; SR_R takes BTN_TR2 ("Trigger R") instead so it stays distinguishable.
 #
 # The evdev targets use the kernel driver's Nintendo-position convention
 # (A=east, B=south, X=north, Y=west), NOT this project's usual Xbox-style
@@ -120,9 +126,9 @@ JOYCON2_RIGHT_BUTTON_MAP = {
     "A": e.BTN_SOUTH,   # physical B fires the "A" bit
     "Y": e.BTN_WEST,
     "R": e.BTN_TR,
-    "ZR": e.BTN_TR2,
+    "ZR": e.BTN_TL2,    # matches its own trigger axis's "left" slot naming
     "SL_R": e.BTN_TL,
-    "SR_R": e.BTN_TL2,
+    "SR_R": e.BTN_TR2,
     "PLUS": e.BTN_START,
     "HOME": e.BTN_MODE,
     "R_STK": e.BTN_THUMBL,
