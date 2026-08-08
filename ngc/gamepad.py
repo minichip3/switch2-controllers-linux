@@ -159,8 +159,10 @@ JOYCON2_LEFT_BUTTON_MAP = {
 
 DEFAULT_BUTTON_MAP = PRO_BUTTON_MAP
 
-# Joy-Con 2 (either side) presents a single physical stick/trigger; the
-# uinput device drops the unused RX/RY/RZ axes accordingly (see SwitchGamepad).
+# Joy-Con 2 (either side) presents a single physical stick; the uinput
+# device drops the unused RX/RY axes accordingly (see SwitchGamepad). Both
+# trigger axes (Z/RZ) and the D-pad hat are still declared even though only
+# one side is ever real for a given product.
 SINGLE_STICK_PIDS = {P.JOYCON2_LEFT_PID, P.JOYCON2_RIGHT_PID}
 
 
