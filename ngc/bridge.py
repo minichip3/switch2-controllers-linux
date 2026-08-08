@@ -575,22 +575,19 @@ class _Worker:
 
     def _ensure_gamepad(self, ctrl: SwitchController) -> None:
         pid = ctrl.product_id
-        if self.pair is not None:
-            side = self.pair.side_for_pid(pid)
+        if self.config.dual_mode and self.hub.bridge is not None:
+            side = _PairCoordinator.side_for_pid(pid)
             if side is not None:
+                pair = self.hub.bridge.get_or_create_joycon_pair()
                 ctrl.combined_mode = True
+                self.pair = pair
                 self._pair_side = side
-                self.pair.activate_side(side, self)
+                pair.activate_side(side, self)
                 logger.info(
-                    "paired %s as %s half of P%d combined pad",
-                    self.entry.mac, side, self.entry.player,
+                    "dual mode: %s joined as %s half of the combined pad",
+                    self.entry.mac, side,
                 )
                 return
-            logger.warning(
-                "P%d has two controllers configured but %s (%s) isn't a solo "
-                "Joy-Con 2 half; falling back to its own separate pad",
-                self.entry.player, self.entry.mac, ctrl.name,
-            )
         if self.gamepad is not None and self._gamepad_product == pid:
             return
         if self.gamepad is not None:
@@ -731,6 +728,21 @@ class Bridge:
         self._reorder_timer: Optional[threading.Timer] = None
         self._reorder_lock = threading.Lock()
         self._state_lock = threading.Lock()
+        self._joycon_pair: Optional[_PairCoordinator] = None
+        self._joycon_pair_lock = threading.Lock()
+
+    def get_or_create_joycon_pair(self) -> _PairCoordinator:
+        """Dual mode's single Left+Right Joy-Con 2 pair, created lazily on
+        whichever half connects first. Both halves share this same instance
+        regardless of connection order or their individually configured
+        player slots."""
+        with self._joycon_pair_lock:
+            if self._joycon_pair is None:
+                player = min((e.player for e in self.config.entries()), default=1)
+                self._joycon_pair = _PairCoordinator(
+                    player, self.config, self.dsu, self._schedule_reorder
+                )
+            return self._joycon_pair
 
     def _battery_pct(self, mv: Optional[int]) -> Optional[int]:
         if not mv:
@@ -845,20 +857,8 @@ class Bridge:
         self._publish_state()
         threading.Thread(target=self._state_loop, name="ngc-state", daemon=True).start()
         logger.info("starting %d controller worker(s)", len(entries))
-
-        # Two controllers on the same player slot are treated as a Left+Right
-        # Joy-Con 2 pair and merged into one combined virtual gamepad (see
-        # _PairCoordinator). Determined from config at startup; a mismatched
-        # pair (not one Joy-Con2 of each side) falls back to separate pads
-        # once connected (_Worker._ensure_gamepad logs a warning).
-        by_player: dict[int, list[ControllerEntry]] = {}
-        for entry in entries:
-            by_player.setdefault(entry.player, []).append(entry)
-        pairs: dict[int, _PairCoordinator] = {
-            player: _PairCoordinator(player, self.config, self.dsu, self._schedule_reorder)
-            for player, group in by_player.items()
-            if len(group) == 2
-        }
+        if self.config.dual_mode:
+            logger.info("dual mode enabled: a connected Joy-Con 2 Left+Right pair will merge into one pad")
 
         for entry in entries:
             worker = _Worker(
@@ -868,7 +868,6 @@ class Bridge:
                 self.hub,
                 dsu=self.dsu,
                 on_topology_change=self._schedule_reorder,
-                pair=pairs.get(entry.player),
             )
             self.workers.append(worker)
             threading.Thread(target=worker.run, name=f"ctrl-{entry.player}", daemon=True).start()

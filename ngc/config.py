@@ -49,6 +49,11 @@ class Config:
     button_map: dict = field(default_factory=dict)
     # Rumble: GameCube uses safe presets; Pro/Joy-Con use the real HD motor.
     enable_rumble: bool = True
+    # When true, any connected Left+Right Joy-Con 2 pair is merged into one
+    # combined virtual gamepad regardless of their configured player slots
+    # (see bridge.Bridge.get_or_create_joycon_pair). Off by default: each
+    # Joy-Con stays its own solo pad.
+    dual_mode: bool = False
     # Legacy single-controller fields (migrated into `controllers` on load).
     controller_mac: Optional[str] = None
     player: int = 1
@@ -115,10 +120,10 @@ class Config:
     def add_controller(self, mac: str, name: str = "", player: int | None = None) -> ControllerEntry:
         """Add (or update) a controller, assigning the next free player slot.
 
-        A player slot may hold up to two controllers -- a Left+Right Joy-Con 2
-        pair, merged by the bridge into one combined virtual gamepad (see
-        bridge._PairCoordinator). A third controller on the same slot is
-        rejected.
+        A player slot may hold up to two controllers. This isn't required for
+        Joy-Con 2 dual mode (Config.dual_mode pairs Left+Right automatically
+        regardless of slot), but is allowed for explicit co-location. A third
+        controller on the same slot is rejected.
         """
         mac = mac.upper()
         for c in self.controllers:
