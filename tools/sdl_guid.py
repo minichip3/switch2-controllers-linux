@@ -166,11 +166,95 @@ def fix_gamecube_mapping(mapping: str) -> str:
     return ",".join([guid, name, *buttons, *axis_tokens])
 
 
+# Solo Joy-Con 2 axes: only one stick/trigger exists (see gamepad.py
+# single_stick handling), so there's no rightx/righty/a3/a4/a5 -- SDL would
+# otherwise fall back to its generic-pad guess, which is where the "PS-style"
+# button names in Dolphin/other SDL apps came from (no gamecontrollerdb entry
+# for this GUID). This mirrors NGC_GC_AXES's evdev-order convention.
+JOYCON2_RIGHT_AXES = (
+    "leftx:a0",
+    "lefty:a1",
+    "righttrigger:a2",
+    "platform:Linux",
+)
+
+JOYCON2_LEFT_AXES = (
+    "leftx:a0",
+    "lefty:a1",
+    "lefttrigger:a2",
+    "platform:Linux",
+)
+
+
+def fix_joycon_right_mapping(mapping: str) -> str:
+    """Build a complete gamecontrollerdb line for a solo Right Joy-Con 2.
+
+    Matches ngc/gamepad.py's JOYCON2_RIGHT_BUTTON_MAP evdev-code sort order.
+    SL_R/SR_R (the rail buttons standing in for the missing left half) reuse
+    the otherwise-unused leftshoulder/lefttrigger button slots; GR (the new
+    Switch 2 rail button) goes to misc2, same slot the GameCube map uses for
+    its extra C button. The stick/trigger are presented as primary (left).
+    """
+    parts = mapping.split(",")
+    if len(parts) < 2:
+        return mapping
+    guid, name = parts[0], parts[1]
+    # b0=B b1=A b2=GR b3=X b4=Y b5=SL_R b6=R b7=SR_R b9=Plus b10=Home b11=stick
+    buttons = [
+        "b:b0",
+        "a:b1",
+        "misc2:b2",
+        "x:b3",
+        "y:b4",
+        "leftshoulder:b5",
+        "rightshoulder:b6",
+        "lefttrigger:b7",
+        "start:b9",
+        "guide:b10",
+        "leftstick:b11",
+    ]
+    return ",".join([guid, name, *buttons, *JOYCON2_RIGHT_AXES])
+
+
+def fix_joycon_left_mapping(mapping: str) -> str:
+    """Build a complete gamecontrollerdb line for a solo Left Joy-Con 2.
+
+    Matches ngc/gamepad.py's JOYCON2_LEFT_BUTTON_MAP evdev-code sort order.
+    UP/DOWN/LEFT/RIGHT are real d-pad buttons on this side, so the hat tokens
+    from SDL's auto-generated line are kept, same as the GameCube fixup.
+    """
+    parts = mapping.split(",")
+    if len(parts) < 2:
+        return mapping
+    guid, name = parts[0], parts[1]
+    hat_tokens = [
+        token for token in parts[2:]
+        if token.split(":", 1)[0] in _KEEP_HAT_KEYS
+    ]
+    axis_tokens = list(JOYCON2_LEFT_AXES[:-1]) + hat_tokens + [JOYCON2_LEFT_AXES[-1]]
+    # b0=GL b1=Capture b2=L b3=SL_L b4=ZL b5=SR_L b6=Minus b7=stick
+    buttons = [
+        "misc2:b0",
+        "misc1:b1",
+        "leftshoulder:b2",
+        "rightshoulder:b3",
+        "righttrigger:b5",
+        "back:b6",
+        "leftstick:b7",
+    ]
+    return ",".join([guid, name, *buttons, *axis_tokens])
+
+
 def mapping_for_pad(name: str, mapping: str | None) -> str | None:
     if not mapping:
         return None
-    if "gamecube" in name.lower():
+    low = name.lower()
+    if "gamecube" in low:
         return fix_gamecube_mapping(mapping)
+    if "joy-con 2" in low and "right" in low:
+        return fix_joycon_right_mapping(mapping)
+    if "joy-con 2" in low and "left" in low:
+        return fix_joycon_left_mapping(mapping)
     return mapping
 
 
