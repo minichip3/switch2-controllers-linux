@@ -167,9 +167,9 @@ JOYCON2_LEFT_BUTTON_MAP = {
     "L": e.BTN_TL2,
     "ZL": e.BTN_TR2,
     "MINUS": e.BTN_SELECT,
-    "CAPTURE": e.BTN_Z,
+    "CAPTURE": e.BTN_C,   # Steam's capture-icon slot seems to read BTN_C, not BTN_Z
     "L_STK": e.BTN_THUMBL,
-    "GL": e.BTN_C,
+    "GL": e.BTN_Z,        # swapped with CAPTURE; untestable on hardware without a GL button
 }
 
 DEFAULT_BUTTON_MAP = PRO_BUTTON_MAP
