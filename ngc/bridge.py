@@ -414,6 +414,12 @@ class _Worker:
 
     def _on_input(self, ctrl: SwitchController, report: P.InputReport) -> None:
         (lx, ly), (rx, ry), lt, rt = ctrl.calibrated_input(report)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "%s raw buttons=%s left_raw=%s right_raw=%s -> L=(%.2f,%.2f) R=(%.2f,%.2f) lt=%d rt=%d",
+                self.entry.mac, report.pressed(), report.left_stick_raw, report.right_stick_raw,
+                lx, ly, rx, ry, lt, rt,
+            )
         if self.gamepad is not None:
             self.gamepad.update(report.buttons, (lx, ly), (rx, ry), lt, rt)
         if self.motion is not None:
