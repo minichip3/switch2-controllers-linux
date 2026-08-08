@@ -149,11 +149,14 @@ JOYCON2_RIGHT_BUTTON_MAP = {
 # (BTN_TRIGGER_HAPPY1/2) broke Steam's device recognition wholesale when
 # tried on the right side's R/ZR, so L/ZL use plain BTN_TL2/TR2 instead.
 # SL_L/SR_L on TL/TR mirrors the right side's confirmed-correct SL_R/SR_R.
+# UP/DOWN were swapped from SDL's raw mapping after hardware testing showed
+# the landscape (sideways) grip orientation needs them flipped from what the
+# upstream bit table alone would suggest.
 JOYCON2_LEFT_BUTTON_MAP = {
-    "DOWN": e.BTN_EAST,
-    "UP": e.BTN_SOUTH,   # swapped with LEFT: matches landscape (sideways) grip
+    "UP": e.BTN_EAST,
+    "DOWN": e.BTN_WEST,
     "RIGHT": e.BTN_NORTH,
-    "LEFT": e.BTN_WEST,  # swapped with UP
+    "LEFT": e.BTN_SOUTH,
     "SR_L": e.BTN_TR,
     "SL_L": e.BTN_TL,
     "L": e.BTN_TL2,
