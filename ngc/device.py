@@ -45,6 +45,7 @@ class SwitchController:
         self.right_calib: Optional[P.StickCalibration] = None
         self.trigger_neutral = (P.GC_TRIGGER_DEFAULT_NEUTRAL, P.GC_TRIGGER_DEFAULT_NEUTRAL)
         self.battery_mv: Optional[int] = None
+        self._joycon_stick_recentered = False
 
         # Resolved GATT handles (start with GameCube defaults, refined by discovery).
         self.h_input = DEFAULT_HANDLE_INPUT_REPORT
@@ -416,15 +417,22 @@ class SwitchController:
 
     def calibrated_input(self, report: P.InputReport):
         """Return (left_xy, right_xy floats, lt, rt 0-255) from a report."""
+        if self.is_joycon_right and self.right_calib and not self._joycon_stick_recentered:
+            # The factory calibration read for a lone Right Joy-Con's stick
+            # gives correct min/max (movement direction/range is fine on
+            # hardware) but a wrong center, producing a constant offset at
+            # rest. Re-anchor the center to the first live report instead —
+            # assumes the stick is at physical rest right after connecting,
+            # same assumption other solo-Joy-Con drivers make.
+            self.right_calib.center = report.right_stick_raw
+            self._joycon_stick_recentered = True
+            logger.info("Joy-Con R: recentered stick to %s", report.right_stick_raw)
         lx, ly = self.left_calib.apply(report.left_stick_raw) if self.left_calib else (0.0, 0.0)
         rx, ry = self.right_calib.apply(report.right_stick_raw) if self.right_calib else (0.0, 0.0)
         if self.is_joycon_right:
             # A lone Right Joy-Con has exactly one physical stick, reported via
-            # right_stick_raw/right_calib (using left_stick_raw here went dead
-            # entirely on hardware, so that field is not it). Still shows a
-            # constant off-center reading — likely a bad calibration read, not
-            # a wrong raw field; needs a raw -v trace to pin down further.
-            # Present it as the primary (left) stick either way.
+            # right_stick_raw/right_calib (left_stick_raw is dead on hardware).
+            # Present it as the primary (left) stick.
             (lx, ly), (rx, ry) = (rx, ry), (0.0, 0.0)
         if self.has_analog_triggers:
             lt = P.normalize_trigger(report.left_trigger_raw, self.trigger_neutral[0])
