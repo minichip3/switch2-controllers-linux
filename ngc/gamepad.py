@@ -151,9 +151,9 @@ JOYCON2_RIGHT_BUTTON_MAP = {
 # SL_L/SR_L on TL/TR mirrors the right side's confirmed-correct SL_R/SR_R.
 JOYCON2_LEFT_BUTTON_MAP = {
     "DOWN": e.BTN_EAST,
-    "UP": e.BTN_WEST,
+    "UP": e.BTN_SOUTH,   # swapped with LEFT: matches landscape (sideways) grip
     "RIGHT": e.BTN_NORTH,
-    "LEFT": e.BTN_SOUTH,
+    "LEFT": e.BTN_WEST,  # swapped with UP
     "SR_L": e.BTN_TR,
     "SL_L": e.BTN_TL,
     "L": e.BTN_TL2,

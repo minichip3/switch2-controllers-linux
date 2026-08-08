@@ -442,6 +442,11 @@ class SwitchController:
             self._track_joycon_stick(self.right_calib, report.right_stick_raw)
         lx, ly = self.left_calib.apply(report.left_stick_raw) if self.left_calib else (0.0, 0.0)
         rx, ry = self.right_calib.apply(report.right_stick_raw) if self.right_calib else (0.0, 0.0)
+        if self.is_joycon_left:
+            # A lone Left Joy-Con's stick is already the primary (left) one,
+            # but rotated 90 degrees counter-clockwise relative to its
+            # reported x/y; correct that here.
+            lx, ly = -ly, lx
         if self.is_joycon_right:
             # A lone Right Joy-Con has exactly one physical stick, reported via
             # right_stick_raw/right_calib (left_stick_raw is dead on hardware).
