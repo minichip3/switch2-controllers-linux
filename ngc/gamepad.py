@@ -166,10 +166,12 @@ JOYCON2_LEFT_BUTTON_MAP = {
     "SL_L": e.BTN_TL,
     "L": e.BTN_TL2,
     "ZL": e.BTN_TR2,
-    "MINUS": e.BTN_SELECT,
-    "CAPTURE": e.BTN_C,   # Steam's capture-icon slot seems to read BTN_C, not BTN_Z
+    # SDL's HandleMiniControllerStateL treats MINUS as this side's Start
+    # (no Plus button to use) and CAPTURE as its Guide/Home (no Home button).
+    "MINUS": e.BTN_START,
+    "CAPTURE": e.BTN_MODE,
     "L_STK": e.BTN_THUMBL,
-    "GL": e.BTN_Z,        # swapped with CAPTURE; untestable on hardware without a GL button
+    "GL": e.BTN_C,
 }
 
 DEFAULT_BUTTON_MAP = PRO_BUTTON_MAP
