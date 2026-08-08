@@ -2,10 +2,14 @@
 """Print SDL GUIDs + GameController mappings for connected pads, and optionally
 upsert ngc mappings into ~/Applications/gamecontrollerdb.txt.
 
+Needs PySDL2, which is NOT one of the core bridge dependencies (not in
+requirements.txt) -- install it into the project venv first:
+    uv pip install --python .venv312 pysdl2 pysdl2-dll
+
 Run this ON the Bazzite box with the controllers awake/connected:
-    python3 tools/sdl_guid.py            # list pads + GUID + mapping
-    python3 tools/sdl_guid.py --write     # upsert ngc lines in Applications DB
-    python3 tools/sdl_guid.py --restore-dbs  # fix truncated Steam/EmuDeck overrides
+    .venv312/bin/python3 tools/sdl_guid.py            # list pads + GUID + mapping
+    .venv312/bin/python3 tools/sdl_guid.py --write     # upsert ngc lines in Applications DB
+    .venv312/bin/python3 tools/sdl_guid.py --restore-dbs  # fix truncated Steam/EmuDeck overrides
 
 Never write a one-line override into ~/.local/share/Steam/gamecontrollerdb.txt —
 SDL treats that file as the full mapping table and every other controller stops
