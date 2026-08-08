@@ -166,9 +166,13 @@ JOYCON2_LEFT_BUTTON_MAP = {
     "SL_L": e.BTN_TL,
     "L": e.BTN_TL2,
     "ZL": e.BTN_TR2,
-    # SDL's HandleMiniControllerStateL treats MINUS as this side's Start
-    # (no Plus button to use) and CAPTURE as its Guide/Home (no Home button).
-    "MINUS": e.BTN_START,
+    # joycon2cpp (TheFrano) -- a Switch-2-specific reference using the exact
+    # same protocol/byte layout as this project (verified: matching stick
+    # offsets and its landscape dpad-remap logic matches our own raw -v
+    # trace bit-for-bit) -- maps solo Left Joy-Con MINUS to DS4 Share
+    # (Select/Back), not Start. SDL's Switch-1-only HandleMiniControllerStateL
+    # said Start; trusting the Switch-2-specific source here instead.
+    "MINUS": e.BTN_SELECT,
     "CAPTURE": e.BTN_MODE,
     "L_STK": e.BTN_THUMBL,
     "GL": e.BTN_C,
