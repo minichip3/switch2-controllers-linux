@@ -158,10 +158,10 @@ JOYCON2_RIGHT_BUTTON_MAP = {
 # *landscape* direction, mapped to the natural compass face-button
 # (up=north, right=east, down=south, left=west).
 JOYCON2_LEFT_BUTTON_MAP = {
-    "RIGHT": e.BTN_NORTH,  # landscape UP
+    "RIGHT": e.BTN_WEST,   # landscape UP
     "DOWN": e.BTN_EAST,    # landscape RIGHT
     "LEFT": e.BTN_SOUTH,   # landscape DOWN
-    "UP": e.BTN_WEST,      # landscape LEFT
+    "UP": e.BTN_NORTH,     # landscape LEFT
     "SR_L": e.BTN_TR,
     "SL_L": e.BTN_TL,
     "L": e.BTN_TL2,
