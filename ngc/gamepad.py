@@ -104,15 +104,16 @@ GAMECUBE_BUTTON_MAP = {
 # Joy-Con-2-only key rotation here rather than touched in protocol.py.
 #
 # A raw -v trace confirmed R/SR_R fire their own correct bits (no hardware
-# quirk there) -- Steam's earlier "R shows as SR" was Steam's own display
-# quirk, not something to fix here.
-#
-# SL_R/SR_R -> TL/TL2 and R/ZR -> TR/TR2 (kernel driver convention) is
-# required for Steam's native solo-Joy-Con recognition: it draws SL/SR as a
-# paired "shoulder" region and R/ZR as generic "paddle" slots specifically
-# because of this TL/TL2 vs TR/TR2 grouping. Don't split SL/SR or R/ZR across
-# the TL/TR divide to chase Dolphin's separate (and cosmetic-only) fixed
-# naming for axis vs button triggers -- that was tried and broke Steam.
+# quirk there). The earlier "R/ZR = paddle, SL/SR = shoulder" reference
+# that seemed to require the kernel driver's TL/TL2 vs TR/TR2 grouping
+# turned out to describe SDL's own competing native Joy-Con (Switch-1-only)
+# HIDAPI driver connecting to the same hardware in parallel -- not a
+# constraint from Steam. Steam's own simplified device-details diagram only
+# draws one extra shoulder tab per side (SL/SR); screenshots confirmed it
+# reads that tab from BTN_TR, not BTN_TL2, and has no indicator at all for
+# R/ZR specifically (so R/ZR not lighting anything there is expected, not
+# broken). SR_R therefore goes on BTN_TR so its tab lights correctly; R
+# moves off BTN_TR since nothing currently depends on it landing there.
 #
 # The evdev targets use the kernel driver's Nintendo-position convention
 # (A=east, B=south, X=north, Y=west), NOT this project's usual Xbox-style
@@ -125,10 +126,10 @@ JOYCON2_RIGHT_BUTTON_MAP = {
     "B": e.BTN_NORTH,   # physical X fires the "B" bit
     "A": e.BTN_SOUTH,   # physical B fires the "A" bit
     "Y": e.BTN_WEST,
-    "R": e.BTN_TR,
+    "SR_R": e.BTN_TR,   # Steam's shoulder tab reads BTN_TR, not BTN_TL2
     "ZR": e.BTN_TR2,
     "SL_R": e.BTN_TL,
-    "SR_R": e.BTN_TL2,
+    "R": e.BTN_TL2,
     "PLUS": e.BTN_START,
     "HOME": e.BTN_MODE,
     "R_STK": e.BTN_THUMBL,
