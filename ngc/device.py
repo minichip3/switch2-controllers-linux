@@ -415,24 +415,39 @@ class SwitchController:
 
     # ------------------------------------------------------------------ #
 
+    def _track_joycon_stick(self, calib, raw: tuple[int, int]) -> None:
+        """Live-learn center/range for a lone Joy-Con's stick.
+
+        The factory calibration read for this hardware gives a wrong center
+        (constant rest-position offset) and an over-wide range (real
+        deflection only reaches a small fraction of 1.0), so replace both:
+        anchor center to the first report (stick assumed at rest right after
+        connecting), then grow max/min from the largest deflection actually
+        observed."""
+        if not self._joycon_stick_recentered:
+            calib.center = raw
+            calib.max = (1, 1)
+            calib.min = (1, 1)
+            self._joycon_stick_recentered = True
+            logger.info("Joy-Con: recentered stick to %s", raw)
+            return
+        dx = raw[0] - calib.center[0]
+        dy = raw[1] - calib.center[1]
+        calib.max = (max(calib.max[0], dx), max(calib.max[1], dy))
+        calib.min = (max(calib.min[0], -dx), max(calib.min[1], -dy))
+
     def calibrated_input(self, report: P.InputReport):
         """Return (left_xy, right_xy floats, lt, rt 0-255) from a report."""
-        if self.is_joycon_right and self.right_calib and not self._joycon_stick_recentered:
-            # The factory calibration read for a lone Right Joy-Con's stick
-            # gives correct min/max (movement direction/range is fine on
-            # hardware) but a wrong center, producing a constant offset at
-            # rest. Re-anchor the center to the first live report instead —
-            # assumes the stick is at physical rest right after connecting,
-            # same assumption other solo-Joy-Con drivers make.
-            self.right_calib.center = report.right_stick_raw
-            self._joycon_stick_recentered = True
-            logger.info("Joy-Con R: recentered stick to %s", report.right_stick_raw)
+        if self.is_joycon_right and self.right_calib:
+            self._track_joycon_stick(self.right_calib, report.right_stick_raw)
         lx, ly = self.left_calib.apply(report.left_stick_raw) if self.left_calib else (0.0, 0.0)
         rx, ry = self.right_calib.apply(report.right_stick_raw) if self.right_calib else (0.0, 0.0)
         if self.is_joycon_right:
             # A lone Right Joy-Con has exactly one physical stick, reported via
             # right_stick_raw/right_calib (left_stick_raw is dead on hardware).
-            # Present it as the primary (left) stick.
+            # It's rotated 90 degrees clockwise relative to its reported x/y;
+            # correct that before presenting it as the primary (left) stick.
+            rx, ry = ry, -rx
             (lx, ly), (rx, ry) = (rx, ry), (0.0, 0.0)
         if self.has_analog_triggers:
             lt = P.normalize_trigger(report.left_trigger_raw, self.trigger_neutral[0])
