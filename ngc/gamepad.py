@@ -230,12 +230,15 @@ class SwitchGamepad:
                 (e.ABS_RX, AbsInfo(0, STICK_MIN, STICK_MAX, 0, 0, 0)),
                 (e.ABS_RY, AbsInfo(0, STICK_MIN, STICK_MAX, 0, 0, 0)),
             ]
-        # Both trigger axes are always declared, even for single-stick Joy-Con
-        # products with only one real trigger: Steam's device-details screen
-        # reads a Joy-Con's ZR status from ABS_RZ specifically and shows no
-        # field at all for it if the axis isn't declared.
+        # Both trigger axes are declared for the Right Joy-Con (which needs
+        # ABS_RZ for Steam's device-details ZR field) and for GC/Pro (which
+        # have both). The Left Joy-Con only has ZL, on ABS_Z -- always
+        # declaring the unused ABS_RZ too (always 0) got misread by Dolphin's
+        # SDL layer as a real right-stick axis, leaking phantom Right X/Y
+        # values.
         abs_caps.append((e.ABS_Z, AbsInfo(0, TRIGGER_MIN, TRIGGER_MAX, 0, 0, 0)))
-        abs_caps.append((e.ABS_RZ, AbsInfo(0, TRIGGER_MIN, TRIGGER_MAX, 0, 0, 0)))
+        if self.product != P.JOYCON2_LEFT_PID:
+            abs_caps.append((e.ABS_RZ, AbsInfo(0, TRIGGER_MIN, TRIGGER_MAX, 0, 0, 0)))
         if not self.face_button_dpad:
             abs_caps += [
                 (e.ABS_HAT0X, AbsInfo(0, -1, 1, 0, 0, 0)),
@@ -327,7 +330,8 @@ class SwitchGamepad:
         # single-stick Joy-Con products -- unlike the stick, which is
         # deliberately re-routed to "primary/left" in device.calibrated_input.
         changed |= self._emit_abs(e.ABS_Z, max(0, min(255, left_trigger)))
-        changed |= self._emit_abs(e.ABS_RZ, max(0, min(255, right_trigger)))
+        if self.product != P.JOYCON2_LEFT_PID:
+            changed |= self._emit_abs(e.ABS_RZ, max(0, min(255, right_trigger)))
 
         if changed:
             self.ui.syn()
@@ -336,7 +340,9 @@ class SwitchGamepad:
         changed = False
         for code in list(self._last_keys):
             changed |= self._emit_key(code, 0)
-        neutral_codes = [e.ABS_X, e.ABS_Y, e.ABS_Z, e.ABS_RZ]
+        neutral_codes = [e.ABS_X, e.ABS_Y, e.ABS_Z]
+        if self.product != P.JOYCON2_LEFT_PID:
+            neutral_codes.append(e.ABS_RZ)
         if not self.single_stick:
             neutral_codes += [e.ABS_RX, e.ABS_RY]
         if not self.face_button_dpad:
