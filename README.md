@@ -43,15 +43,27 @@ fully in user space — no kernel modules, no root.
 | Pro Controller 2      | ✅ tested      | ✅      | ✅     | digital ZL/ZR | ✅ HD rumble | ✅   |
 | Joy-Con 2 (L / R)     | ⚠️ untested   | ?       | ?      | ?             | ?            | ?    |
 
-> **Joy-Con 2 is untested.** The code defines their product IDs, accepts them in
-> the scanner, and has per-side vibration UUIDs, so they may connect. A solo
-> Joy-Con now gets its own button map (mirroring the upstream Linux kernel's
-> hid-nintendo.c solo-Joy-Con tables: SL/SR fill the missing shoulder slots,
-> GL/GR land on the extra C-button slot) and its single stick/trigger is
-> presented as the primary (left) axis instead of a phantom second stick — but
-> none of this has been verified against real hardware yet. Sideways-orientation
-> gyro handling also isn't implemented. Treat Joy-Con 2 as a starting point, not
-> a confirmed-working feature. Reports/PRs welcome.
+> **Joy-Con 2 is in progress.** A solo Joy-Con gets its own button map
+> (mirroring the upstream Linux kernel's hid-nintendo.c solo-Joy-Con tables:
+> SL/SR fill the missing shoulder slots, GL/GR land on the extra C-button
+> slot) and its single stick/trigger is presented as the primary (left) axis
+> instead of a phantom second stick. On real hardware, the right Joy-Con's
+> A/X/B face buttons fired the shared SWITCH_BUTTONS bits one position off
+> (Joy-Con-2-only, compensated in gamepad.py) and its stick's factory
+> calibration was unusable (wrong center, too-narrow range, rotated 90°), so
+> the stick is now live-recentered/scaled and rotated in software instead of
+> trusting the factory bytes. Sideways-orientation gyro handling isn't
+> implemented. Treat Joy-Con 2 as still being validated, not a
+> confirmed-working feature — reports/PRs welcome.
+>
+> **Steam's "Nintendo button layout" toggle**: Steam auto-swaps A/B and X/Y
+> for any Nintendo-vendor (0x057e) controller. This project's virtual pads
+> intentionally emit Xbox-position codes (A=south, B=east, X=west, Y=north,
+> same as a real Nintendo Switch Pro Controller reports) so that swap lands
+> correctly — don't "fix" a Joy-Con/Pro button map to Nintendo-position codes
+> directly, or Steam's toggle will double-swap it back to wrong. If buttons
+> look swapped only in Steam (not in Dolphin/other apps), check that toggle
+> under Controller Settings → your controller → Advanced Settings first.
 
 ## How it works
 
