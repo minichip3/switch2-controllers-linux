@@ -96,10 +96,16 @@ GAMECUBE_BUTTON_MAP = {
 # facing the missing left half) fill the L/ZL shoulder slots. Its one stick is
 # presented as the primary stick by device.calibrated_input(), so the stick
 # click lands on THUMBL (left-stick click), not THUMBR.
+#
+# Hardware testing (see -v raw traces) showed this Joy-Con 2 unit's face
+# buttons fire the SWITCH_BUTTONS bits one position off from the shared
+# GC/Pro table: pressing A sets the "X" bit, X sets the "B" bit, and B sets
+# the "A" bit (Y is unaffected). GC/Pro don't show this, so it's kept as a
+# Joy-Con-2-only key rotation here rather than touched in protocol.py.
 JOYCON2_RIGHT_BUTTON_MAP = {
-    "A": e.BTN_EAST,
-    "B": e.BTN_SOUTH,
-    "X": e.BTN_NORTH,
+    "X": e.BTN_EAST,    # physical A fires the "X" bit
+    "B": e.BTN_NORTH,   # physical X fires the "B" bit
+    "A": e.BTN_SOUTH,   # physical B fires the "A" bit
     "Y": e.BTN_WEST,
     "R": e.BTN_TR,
     "ZR": e.BTN_TR2,
