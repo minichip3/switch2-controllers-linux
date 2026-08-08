@@ -107,12 +107,12 @@ GAMECUBE_BUTTON_MAP = {
 # quirk there) -- Steam's earlier "R shows as SR" was Steam's own display
 # quirk, not something to fix here.
 #
-# ZR's discrete button and its trigger axis (single_stick's sole ABS_Z, see
-# SwitchGamepad) must land on the same "side" or apps that show fixed names
-# for the two independently (e.g. Dolphin: axis a2 = "Trigger L" by slot
-# convention, buttons get their own fixed name) show ZR as both "Trigger L"
-# and "Trigger R" firing together. ZR uses BTN_TL2 ("Trigger L") to match its
-# axis; SR_R takes BTN_TR2 ("Trigger R") instead so it stays distinguishable.
+# SL_R/SR_R -> TL/TL2 and R/ZR -> TR/TR2 (kernel driver convention) is
+# required for Steam's native solo-Joy-Con recognition: it draws SL/SR as a
+# paired "shoulder" region and R/ZR as generic "paddle" slots specifically
+# because of this TL/TL2 vs TR/TR2 grouping. Don't split SL/SR or R/ZR across
+# the TL/TR divide to chase Dolphin's separate (and cosmetic-only) fixed
+# naming for axis vs button triggers -- that was tried and broke Steam.
 #
 # The evdev targets use the kernel driver's Nintendo-position convention
 # (A=east, B=south, X=north, Y=west), NOT this project's usual Xbox-style
@@ -126,9 +126,9 @@ JOYCON2_RIGHT_BUTTON_MAP = {
     "A": e.BTN_SOUTH,   # physical B fires the "A" bit
     "Y": e.BTN_WEST,
     "R": e.BTN_TR,
-    "ZR": e.BTN_TL2,    # matches its own trigger axis's "left" slot naming
+    "ZR": e.BTN_TR2,
     "SL_R": e.BTN_TL,
-    "SR_R": e.BTN_TR2,
+    "SR_R": e.BTN_TL2,
     "PLUS": e.BTN_START,
     "HOME": e.BTN_MODE,
     "R_STK": e.BTN_THUMBL,
