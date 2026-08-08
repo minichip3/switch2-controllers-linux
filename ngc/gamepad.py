@@ -149,14 +149,19 @@ JOYCON2_RIGHT_BUTTON_MAP = {
 # (BTN_TRIGGER_HAPPY1/2) broke Steam's device recognition wholesale when
 # tried on the right side's R/ZR, so L/ZL use plain BTN_TL2/TR2 instead.
 # SL_L/SR_L on TL/TR mirrors the right side's confirmed-correct SL_R/SR_R.
-# UP/DOWN were swapped from SDL's raw mapping after hardware testing showed
-# the landscape (sideways) grip orientation needs them flipped from what the
-# upstream bit table alone would suggest.
+# A raw -v trace settled the confusing back-and-forth on directions: the
+# SWITCH_BUTTONS UP/DOWN/LEFT/RIGHT bit *names* are fixed to the Joy-Con's
+# printed (portrait/upright) orientation, not the landscape grip used for
+# solo play -- e.g. physically pressing what's "up" when held sideways
+# actually fires the "RIGHT" bit. So the four keys below are intentionally
+# not lined up 1:1 with their names: each is the bit that fires for that
+# *landscape* direction, mapped to the natural compass face-button
+# (up=north, right=east, down=south, left=west).
 JOYCON2_LEFT_BUTTON_MAP = {
-    "UP": e.BTN_EAST,
-    "DOWN": e.BTN_WEST,
-    "RIGHT": e.BTN_NORTH,
-    "LEFT": e.BTN_SOUTH,
+    "RIGHT": e.BTN_NORTH,  # landscape UP
+    "DOWN": e.BTN_EAST,    # landscape RIGHT
+    "LEFT": e.BTN_SOUTH,   # landscape DOWN
+    "UP": e.BTN_WEST,      # landscape LEFT
     "SR_L": e.BTN_TR,
     "SL_L": e.BTN_TL,
     "L": e.BTN_TL2,
