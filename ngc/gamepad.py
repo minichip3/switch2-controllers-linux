@@ -141,12 +141,19 @@ JOYCON2_RIGHT_BUTTON_MAP = {
 
 # Solo Left Joy-Con: SDL's HandleMiniControllerStateL (same Valve-contributed
 # source as the right-side reference) treats this side's UP/DOWN/LEFT/RIGHT
-# as face buttons and L/ZL as its own "paddle" type -- but applying that
-# (plus BTN_TRIGGER_HAPPY1/2 for the paddles) broke device recognition
-# entirely on the right side, so it's not applied here either: UP/DOWN/
-# LEFT/RIGHT stay on the D-pad hat, and L/ZL use plain BTN_TL2/TR2. SL_L/SR_L
-# on TL/TR mirrors the right side's confirmed-correct SL_R/SR_R placement.
+# as face buttons, not a D-pad -- confirmed on hardware: using the D-pad hat
+# here instead causes cross-talk where pressing a shoulder button registers
+# as a direction. So face-button routing stays (SwitchGamepad skips the hat
+# entirely for this product; see face_button_dpad). L/ZL are SDL's own
+# "paddle" type there, but the closest evdev equivalent
+# (BTN_TRIGGER_HAPPY1/2) broke Steam's device recognition wholesale when
+# tried on the right side's R/ZR, so L/ZL use plain BTN_TL2/TR2 instead.
+# SL_L/SR_L on TL/TR mirrors the right side's confirmed-correct SL_R/SR_R.
 JOYCON2_LEFT_BUTTON_MAP = {
+    "DOWN": e.BTN_EAST,
+    "UP": e.BTN_WEST,
+    "RIGHT": e.BTN_NORTH,
+    "LEFT": e.BTN_SOUTH,
     "SR_L": e.BTN_TR,
     "SL_L": e.BTN_TL,
     "L": e.BTN_TL2,
@@ -188,6 +195,11 @@ class SwitchGamepad:
         self.button_map = button_map or DEFAULT_BUTTON_MAP
         self.product = product
         self.single_stick = product in SINGLE_STICK_PIDS
+        # A lone Left Joy-Con has no real D-pad -- UP/DOWN/LEFT/RIGHT are
+        # routed as face buttons in JOYCON2_LEFT_BUTTON_MAP instead (matches
+        # SDL's own HandleMiniControllerStateL). Emitting a hat here too, on
+        # hardware, caused shoulder presses to register as D-pad directions.
+        self.face_button_dpad = product == P.JOYCON2_LEFT_PID
         keys = sorted(set(self.button_map.values()))
 
         abs_caps = [
@@ -205,10 +217,11 @@ class SwitchGamepad:
         # field at all for it if the axis isn't declared.
         abs_caps.append((e.ABS_Z, AbsInfo(0, TRIGGER_MIN, TRIGGER_MAX, 0, 0, 0)))
         abs_caps.append((e.ABS_RZ, AbsInfo(0, TRIGGER_MIN, TRIGGER_MAX, 0, 0, 0)))
-        abs_caps += [
-            (e.ABS_HAT0X, AbsInfo(0, -1, 1, 0, 0, 0)),
-            (e.ABS_HAT0Y, AbsInfo(0, -1, 1, 0, 0, 0)),
-        ]
+        if not self.face_button_dpad:
+            abs_caps += [
+                (e.ABS_HAT0X, AbsInfo(0, -1, 1, 0, 0, 0)),
+                (e.ABS_HAT0Y, AbsInfo(0, -1, 1, 0, 0, 0)),
+            ]
 
         capabilities = {
             e.EV_KEY: keys,
@@ -276,14 +289,15 @@ class SwitchGamepad:
         for key_code, pressed in key_states.items():
             changed |= self._emit_key(key_code, pressed)
 
-        dpad_x = (1 if buttons & P.SWITCH_BUTTONS["RIGHT"] else 0) - (
-            1 if buttons & P.SWITCH_BUTTONS["LEFT"] else 0
-        )
-        dpad_y = (1 if buttons & P.SWITCH_BUTTONS["DOWN"] else 0) - (
-            1 if buttons & P.SWITCH_BUTTONS["UP"] else 0
-        )
-        changed |= self._emit_abs(e.ABS_HAT0X, dpad_x)
-        changed |= self._emit_abs(e.ABS_HAT0Y, dpad_y)
+        if not self.face_button_dpad:
+            dpad_x = (1 if buttons & P.SWITCH_BUTTONS["RIGHT"] else 0) - (
+                1 if buttons & P.SWITCH_BUTTONS["LEFT"] else 0
+            )
+            dpad_y = (1 if buttons & P.SWITCH_BUTTONS["DOWN"] else 0) - (
+                1 if buttons & P.SWITCH_BUTTONS["UP"] else 0
+            )
+            changed |= self._emit_abs(e.ABS_HAT0X, dpad_x)
+            changed |= self._emit_abs(e.ABS_HAT0Y, dpad_y)
 
         changed |= self._emit_abs(e.ABS_X, self._scale_stick(left_stick[0]))
         changed |= self._emit_abs(e.ABS_Y, -self._scale_stick(left_stick[1]))
@@ -303,9 +317,11 @@ class SwitchGamepad:
         changed = False
         for code in list(self._last_keys):
             changed |= self._emit_key(code, 0)
-        neutral_codes = [e.ABS_X, e.ABS_Y, e.ABS_Z, e.ABS_RZ, e.ABS_HAT0X, e.ABS_HAT0Y]
+        neutral_codes = [e.ABS_X, e.ABS_Y, e.ABS_Z, e.ABS_RZ]
         if not self.single_stick:
             neutral_codes += [e.ABS_RX, e.ABS_RY]
+        if not self.face_button_dpad:
+            neutral_codes += [e.ABS_HAT0X, e.ABS_HAT0Y]
         for code in neutral_codes:
             changed |= self._emit_abs(code, 0)
         if changed:
