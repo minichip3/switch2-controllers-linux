@@ -106,17 +106,17 @@ GAMECUBE_BUTTON_MAP = {
 # A raw -v trace confirmed R/SR_R fire their own correct bits (no hardware
 # quirk there).
 #
-# Ground truth for the R/ZR/SL/SR slots: SDL's own HandleMiniControllerStateR
-# (src/joystick/hidapi/SDL_hidapi_switch.c, "Code and logic contributed by
-# Valve Corporation") -- the solo-Right-Joy-Con handler -- maps the exact
-# same SWITCH_BUTTONS bit positions to:
-#   0x10 (SR_R) -> RIGHT_SHOULDER   0x20 (SL_R) -> LEFT_SHOULDER
-#   0x40 (R)    -> RIGHT_PADDLE1    0x80 (ZR)   -> RIGHT_PADDLE2
-# R/ZR are their own SDL_GAMEPAD_BUTTON_SWITCH_RIGHT_PADDLE* type, distinct
-# from shoulder/trigger -- that's why they never fit cleanly into the
-# TL/TL2/TR/TR2 quartet (already fully claimed by SL/SR/ABXY-adjacent use)
-# in earlier attempts. evdev's closest equivalent for "extra paddle button
-# with no standard slot" is BTN_TRIGGER_HAPPY1/2.
+# SDL's own HandleMiniControllerStateR (src/joystick/hidapi/SDL_hidapi_switch.c,
+# Valve-contributed) treats SR_R/SL_R as RIGHT_SHOULDER/LEFT_SHOULDER (matches
+# below) and R/ZR as their own RIGHT_PADDLE1/2 type, distinct from
+# shoulder/trigger. BTN_TRIGGER_HAPPY1/2 looked like the natural evdev
+# equivalent for that "extra paddle" concept, but using it broke Steam's
+# recognition of the whole device (even PLUS/HOME/R_STK, untouched by that
+# change, started reading scrambled) -- an unfamiliar code apparently
+# confuses whatever heuristic Steam uses here more than a wrong-but-standard
+# gamepad code does. R/ZR stay on BTN_TL2/TR2 (no dedicated Steam indicator,
+# but at least a stable, distinct signal) until a code that doesn't break
+# device recognition is found.
 #
 # The evdev targets use the kernel driver's Nintendo-position convention
 # (A=east, B=south, X=north, Y=west), NOT this project's usual Xbox-style
@@ -129,31 +129,28 @@ JOYCON2_RIGHT_BUTTON_MAP = {
     "B": e.BTN_NORTH,   # physical X fires the "B" bit
     "A": e.BTN_SOUTH,   # physical B fires the "A" bit
     "Y": e.BTN_WEST,
-    "SR_R": e.BTN_TR,           # RIGHT_SHOULDER
-    "SL_R": e.BTN_TL,           # LEFT_SHOULDER
-    "R": e.BTN_TRIGGER_HAPPY1,  # RIGHT_PADDLE1
-    "ZR": e.BTN_TRIGGER_HAPPY2, # RIGHT_PADDLE2
+    "SR_R": e.BTN_TR,   # RIGHT_SHOULDER
+    "SL_R": e.BTN_TL,   # LEFT_SHOULDER
+    "R": e.BTN_TL2,
+    "ZR": e.BTN_TR2,
     "PLUS": e.BTN_START,
     "HOME": e.BTN_MODE,
     "R_STK": e.BTN_THUMBL,
     "GR": e.BTN_C,
 }
 
-# Solo Left Joy-Con: per SDL's HandleMiniControllerStateL (same source as the
-# right-side reference above), a lone Left Joy-Con has no real D-pad -- the
-# four direction buttons stand in for the ABXY diamond (DOWN=east, UP=west,
-# RIGHT=north, LEFT=south), SR_L/SL_L are the shoulders, and L/ZL are the
-# "paddle" type like R/ZR on the right side. This product does NOT use the
-# D-pad hat in SwitchGamepad.update() -- see the JOYCON2_LEFT_PID check there.
+# Solo Left Joy-Con: SDL's HandleMiniControllerStateL (same Valve-contributed
+# source as the right-side reference) treats this side's UP/DOWN/LEFT/RIGHT
+# as face buttons and L/ZL as its own "paddle" type -- but applying that
+# (plus BTN_TRIGGER_HAPPY1/2 for the paddles) broke device recognition
+# entirely on the right side, so it's not applied here either: UP/DOWN/
+# LEFT/RIGHT stay on the D-pad hat, and L/ZL use plain BTN_TL2/TR2. SL_L/SR_L
+# on TL/TR mirrors the right side's confirmed-correct SL_R/SR_R placement.
 JOYCON2_LEFT_BUTTON_MAP = {
-    "DOWN": e.BTN_EAST,
-    "UP": e.BTN_WEST,
-    "RIGHT": e.BTN_NORTH,
-    "LEFT": e.BTN_SOUTH,
-    "SR_L": e.BTN_TR,           # RIGHT_SHOULDER
-    "SL_L": e.BTN_TL,           # LEFT_SHOULDER
-    "L": e.BTN_TRIGGER_HAPPY1,  # LEFT_PADDLE1
-    "ZL": e.BTN_TRIGGER_HAPPY2, # LEFT_PADDLE2
+    "SR_L": e.BTN_TR,
+    "SL_L": e.BTN_TL,
+    "L": e.BTN_TL2,
+    "ZL": e.BTN_TR2,
     "MINUS": e.BTN_SELECT,
     "CAPTURE": e.BTN_Z,
     "L_STK": e.BTN_THUMBL,
@@ -206,11 +203,10 @@ class SwitchGamepad:
         # field at all for it if the axis isn't declared.
         abs_caps.append((e.ABS_Z, AbsInfo(0, TRIGGER_MIN, TRIGGER_MAX, 0, 0, 0)))
         abs_caps.append((e.ABS_RZ, AbsInfo(0, TRIGGER_MIN, TRIGGER_MAX, 0, 0, 0)))
-        if not self.single_stick:
-            abs_caps += [
-                (e.ABS_HAT0X, AbsInfo(0, -1, 1, 0, 0, 0)),
-                (e.ABS_HAT0Y, AbsInfo(0, -1, 1, 0, 0, 0)),
-            ]
+        abs_caps += [
+            (e.ABS_HAT0X, AbsInfo(0, -1, 1, 0, 0, 0)),
+            (e.ABS_HAT0Y, AbsInfo(0, -1, 1, 0, 0, 0)),
+        ]
 
         capabilities = {
             e.EV_KEY: keys,
@@ -278,20 +274,14 @@ class SwitchGamepad:
         for key_code, pressed in key_states.items():
             changed |= self._emit_key(key_code, pressed)
 
-        if not self.single_stick:
-            # Solo Joy-Con UP/DOWN/LEFT/RIGHT aren't a real D-pad -- on the
-            # Left side they're repurposed as face buttons (see
-            # JOYCON2_LEFT_BUTTON_MAP) and the Right side doesn't have them
-            # at all, so emitting a hat here too would just double-signal
-            # the same bits under two different axes.
-            dpad_x = (1 if buttons & P.SWITCH_BUTTONS["RIGHT"] else 0) - (
-                1 if buttons & P.SWITCH_BUTTONS["LEFT"] else 0
-            )
-            dpad_y = (1 if buttons & P.SWITCH_BUTTONS["DOWN"] else 0) - (
-                1 if buttons & P.SWITCH_BUTTONS["UP"] else 0
-            )
-            changed |= self._emit_abs(e.ABS_HAT0X, dpad_x)
-            changed |= self._emit_abs(e.ABS_HAT0Y, dpad_y)
+        dpad_x = (1 if buttons & P.SWITCH_BUTTONS["RIGHT"] else 0) - (
+            1 if buttons & P.SWITCH_BUTTONS["LEFT"] else 0
+        )
+        dpad_y = (1 if buttons & P.SWITCH_BUTTONS["DOWN"] else 0) - (
+            1 if buttons & P.SWITCH_BUTTONS["UP"] else 0
+        )
+        changed |= self._emit_abs(e.ABS_HAT0X, dpad_x)
+        changed |= self._emit_abs(e.ABS_HAT0Y, dpad_y)
 
         changed |= self._emit_abs(e.ABS_X, self._scale_stick(left_stick[0]))
         changed |= self._emit_abs(e.ABS_Y, -self._scale_stick(left_stick[1]))
@@ -311,9 +301,9 @@ class SwitchGamepad:
         changed = False
         for code in list(self._last_keys):
             changed |= self._emit_key(code, 0)
-        neutral_codes = [e.ABS_X, e.ABS_Y, e.ABS_Z, e.ABS_RZ]
+        neutral_codes = [e.ABS_X, e.ABS_Y, e.ABS_Z, e.ABS_RZ, e.ABS_HAT0X, e.ABS_HAT0Y]
         if not self.single_stick:
-            neutral_codes += [e.ABS_RX, e.ABS_RY, e.ABS_HAT0X, e.ABS_HAT0Y]
+            neutral_codes += [e.ABS_RX, e.ABS_RY]
         for code in neutral_codes:
             changed |= self._emit_abs(code, 0)
         if changed:

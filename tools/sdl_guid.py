@@ -193,18 +193,19 @@ JOYCON2_LEFT_AXES = (
 def fix_joycon_right_mapping(mapping: str) -> str:
     """Build a complete gamecontrollerdb line for a solo Right Joy-Con 2.
 
-    Matches ngc/gamepad.py's JOYCON2_RIGHT_BUTTON_MAP evdev-code sort order,
-    which follows SDL's own HandleMiniControllerStateR (SDL_hidapi_switch.c,
-    Valve-contributed) for the SL/SR/R/ZR slots: SR_R=rightshoulder,
-    SL_R=leftshoulder, R/ZR are their own "paddle" type (no standard evdev
-    button code, hence BTN_TRIGGER_HAPPY1/2 -- sorted to the end, past GR).
+    Matches ngc/gamepad.py's JOYCON2_RIGHT_BUTTON_MAP evdev-code sort order.
+    SL_R/SR_R (rightshoulder/leftshoulder) match SDL's own
+    HandleMiniControllerStateR (SDL_hidapi_switch.c, Valve-contributed); R/ZR
+    are SDL's own "paddle" type there, but using the closest evdev equivalent
+    (BTN_TRIGGER_HAPPY1/2) broke Steam's recognition of the whole device, so
+    they stay on the plain BTN_TL2/TR2 slots (lefttrigger/righttrigger) here.
     """
     parts = mapping.split(",")
     if len(parts) < 2:
         return mapping
     guid, name = parts[0], parts[1]
-    # b0=A b1=X b2=GR b3=B b4=Y b5=SL_R b6=SR_R b7=Plus b8=Home b9=stick
-    # b10=R(paddle1) b11=ZR(paddle2)
+    # b0=A b1=X b2=GR b3=B b4=Y b5=SL_R b6=SR_R b7=R b8=ZR b9=Plus b10=Home
+    # b11=stick
     buttons = [
         "a:b0",
         "x:b1",
@@ -213,11 +214,11 @@ def fix_joycon_right_mapping(mapping: str) -> str:
         "y:b4",
         "leftshoulder:b5",
         "rightshoulder:b6",
-        "start:b7",
-        "guide:b8",
-        "leftstick:b9",
-        "rightpaddle1:b10",
-        "rightpaddle2:b11",
+        "lefttrigger:b7",
+        "righttrigger:b8",
+        "start:b9",
+        "guide:b10",
+        "leftstick:b11",
     ]
     return ",".join([guid, name, *buttons, *JOYCON2_RIGHT_AXES])
 
@@ -225,33 +226,31 @@ def fix_joycon_right_mapping(mapping: str) -> str:
 def fix_joycon_left_mapping(mapping: str) -> str:
     """Build a complete gamecontrollerdb line for a solo Left Joy-Con 2.
 
-    Matches ngc/gamepad.py's JOYCON2_LEFT_BUTTON_MAP evdev-code sort order,
-    which follows SDL's own HandleMiniControllerStateL (SDL_hidapi_switch.c,
-    Valve-contributed): this side has no real D-pad -- LEFT/DOWN/RIGHT/UP
-    stand in for the south/east/north/west face buttons, so there are no hat
-    tokens to keep here (unlike the GameCube fixup).
+    Matches ngc/gamepad.py's JOYCON2_LEFT_BUTTON_MAP evdev-code sort order.
+    UP/DOWN/LEFT/RIGHT are real d-pad buttons on this side, so the hat tokens
+    from SDL's auto-generated line are kept, same as the GameCube fixup.
     """
     parts = mapping.split(",")
     if len(parts) < 2:
         return mapping
     guid, name = parts[0], parts[1]
-    # b0=LEFT b1=DOWN b2=GL b3=RIGHT b4=UP b5=Capture b6=SL_L b7=SR_L
-    # b8=Minus b9=stick b10=L(paddle1) b11=ZL(paddle2)
-    buttons = [
-        "a:b0",
-        "b:b1",
-        "misc2:b2",
-        "x:b3",
-        "y:b4",
-        "misc1:b5",
-        "leftshoulder:b6",
-        "rightshoulder:b7",
-        "back:b8",
-        "leftstick:b9",
-        "leftpaddle1:b10",
-        "leftpaddle2:b11",
+    hat_tokens = [
+        token for token in parts[2:]
+        if token.split(":", 1)[0] in _KEEP_HAT_KEYS
     ]
-    return ",".join([guid, name, *buttons, *JOYCON2_LEFT_AXES])
+    axis_tokens = list(JOYCON2_LEFT_AXES[:-1]) + hat_tokens + [JOYCON2_LEFT_AXES[-1]]
+    # b0=GL b1=Capture b2=SL_L b3=SR_L b4=L b5=ZL b6=Minus b7=stick
+    buttons = [
+        "misc2:b0",
+        "misc1:b1",
+        "leftshoulder:b2",
+        "rightshoulder:b3",
+        "lefttrigger:b4",
+        "righttrigger:b5",
+        "back:b6",
+        "leftstick:b7",
+    ]
+    return ",".join([guid, name, *buttons, *axis_tokens])
 
 
 def mapping_for_pad(name: str, mapping: str | None) -> str | None:
