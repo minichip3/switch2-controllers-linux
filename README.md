@@ -56,14 +56,16 @@ fully in user space — no kernel modules, no root.
 > implemented. Treat Joy-Con 2 as still being validated, not a
 > confirmed-working feature — reports/PRs welcome.
 >
-> **Steam's "Nintendo button layout" toggle**: Steam auto-swaps A/B and X/Y
-> for any Nintendo-vendor (0x057e) controller. This project's virtual pads
-> intentionally emit Xbox-position codes (A=south, B=east, X=west, Y=north,
-> same as a real Nintendo Switch Pro Controller reports) so that swap lands
-> correctly — don't "fix" a Joy-Con/Pro button map to Nintendo-position codes
-> directly, or Steam's toggle will double-swap it back to wrong. If buttons
-> look swapped only in Steam (not in Dolphin/other apps), check that toggle
-> under Controller Settings → your controller → Advanced Settings first.
+> **Steam's "Nintendo button layout" toggle**: Steam Input has a per-controller
+> toggle (Controller Settings → your controller → Advanced Settings) that swaps
+> A/B and X/Y for Nintendo-vendor (0x057e) devices, and is on by default for
+> this device. gamepad.py's Joy-Con 2 map emits the kernel-driver's
+> Nintendo-position codes (A=east, B=south, X=north, Y=west) specifically so
+> that this default-on Steam swap lands correctly (both function and on-screen
+> button prompts) -- turning it off gives the right function but the wrong
+> icon, since Steam then shows prompts for the un-swapped raw codes. Leave the
+> toggle on. If ABXY looks swapped only in Steam and not in Dolphin/other
+> apps, check that this toggle didn't get switched off.
 
 ## How it works
 

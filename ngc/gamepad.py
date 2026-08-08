@@ -103,16 +103,17 @@ GAMECUBE_BUTTON_MAP = {
 # the "A" bit (Y is unaffected). GC/Pro don't show this, so it's kept as a
 # Joy-Con-2-only key rotation here rather than touched in protocol.py.
 #
-# The evdev targets themselves stay on the project's established Xbox-style
-# positions (A=SOUTH, B=EAST, X=WEST, Y=NORTH, same as PRO_BUTTON_MAP), not
-# the kernel driver's Nintendo-position convention: Steam auto-swaps A/B and
-# X/Y for any Nintendo-vendor device ("Nintendo button layout" toggle), so
-# emitting Nintendo positions directly gets double-swapped back to wrong.
+# The evdev targets use the kernel driver's Nintendo-position convention
+# (A=east, B=south, X=north, Y=west), NOT this project's usual Xbox-style
+# positions: hardware testing confirmed this is the combination that reads
+# correctly. (Steam's "Nintendo button layout" toggle also affects this on
+# Steam specifically -- see the README note -- but the evdev-level mapping
+# below is what tested correct.)
 JOYCON2_RIGHT_BUTTON_MAP = {
-    "X": e.BTN_SOUTH,   # physical A fires the "X" bit
-    "A": e.BTN_EAST,    # physical B fires the "A" bit
-    "B": e.BTN_WEST,    # physical X fires the "B" bit
-    "Y": e.BTN_NORTH,
+    "X": e.BTN_EAST,    # physical A fires the "X" bit
+    "B": e.BTN_NORTH,   # physical X fires the "B" bit
+    "A": e.BTN_SOUTH,   # physical B fires the "A" bit
+    "Y": e.BTN_WEST,
     "R": e.BTN_TR,
     "ZR": e.BTN_TR2,
     "SL_R": e.BTN_TL,
