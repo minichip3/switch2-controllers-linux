@@ -100,8 +100,10 @@ GAMECUBE_BUTTON_MAP = {
 # Hardware testing (see -v raw traces) showed this Joy-Con 2 unit's face
 # buttons fire the SWITCH_BUTTONS bits one position off from the shared
 # GC/Pro table: pressing A sets the "X" bit, X sets the "B" bit, and B sets
-# the "A" bit (Y is unaffected). GC/Pro don't show this, so it's kept as a
-# Joy-Con-2-only key rotation here rather than touched in protocol.py.
+# the "A" bit (Y is unaffected). The R/SR_R shoulder pair shows the same kind
+# of swap: pressing physical R fires the "SR_R" bit (SL_R is unaffected).
+# GC/Pro don't show this, so it's kept as a Joy-Con-2-only key rotation here
+# rather than touched in protocol.py.
 #
 # The evdev targets use the kernel driver's Nintendo-position convention
 # (A=east, B=south, X=north, Y=west), NOT this project's usual Xbox-style
@@ -114,10 +116,10 @@ JOYCON2_RIGHT_BUTTON_MAP = {
     "B": e.BTN_NORTH,   # physical X fires the "B" bit
     "A": e.BTN_SOUTH,   # physical B fires the "A" bit
     "Y": e.BTN_WEST,
-    "R": e.BTN_TR,
+    "SR_R": e.BTN_TR,   # physical R fires the "SR_R" bit
     "ZR": e.BTN_TR2,
     "SL_R": e.BTN_TL,
-    "SR_R": e.BTN_TL2,
+    "R": e.BTN_TL2,     # whatever fires the "R" bit is physical SR
     "PLUS": e.BTN_START,
     "HOME": e.BTN_MODE,
     "R_STK": e.BTN_THUMBL,
