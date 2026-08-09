@@ -189,17 +189,22 @@ DEFAULT_BUTTON_MAP = PRO_BUTTON_MAP
 # Pro Controller 2 (product=P.PRO_CONTROLLER2_PID). Compensates for this
 # physical unit's hardware bit rotation (see JOYCON2_RIGHT_BUTTON_MAP):
 # physical A fires the "X" bit, physical X fires the "B" bit, physical B
-# fires the "A" bit, Y is unaffected. Confirmed on hardware: for this PID,
-# Steam's face-button labels are EAST="X"/WEST="B" -- East/West swapped from
-# plain Xbox convention (unlike solo Joy-Con2's own PID) -- so the "A"/"B"
-# keys target WEST/EAST respectively to land correctly. Both sticks are used
-# in their natural (upright) orientation -- no solo-mode rotation. SL/SR/
-# GL/GR have no function when paired like this on a real Switch and are
-# left unmapped.
+# fires the "A" bit, Y is unaffected.
+#
+# Face-button targets below are derived from a live hardware test on this
+# PID: physical A/B/X showed as X/A/B respectively (Y was correct) before
+# this fix -- a 3-way rotation, not a simple pair swap, and not the same
+# East/West-only swap seen on an earlier (differently-mapped) test. If this
+# still doesn't match on retest, get a fresh, complete 4-button readout
+# (physical -> shown for A, B, X, and Y all in the same session) rather than
+# assuming a fixed label function carries over between sessions -- it hasn't
+# so far. Both sticks are used in their natural (upright) orientation -- no
+# solo-mode rotation. SL/SR/GL/GR have no function when paired like this on
+# a real Switch and are left unmapped.
 JOYCON2_COMBINED_BUTTON_MAP = {
-    "X": e.BTN_SOUTH,   # physical A fires the "X" bit
-    "B": e.BTN_EAST,    # physical X fires the "B" bit
-    "A": e.BTN_WEST,    # physical B fires the "A" bit
+    "X": e.BTN_WEST,    # physical A fires the "X" bit
+    "B": e.BTN_SOUTH,   # physical X fires the "B" bit
+    "A": e.BTN_EAST,    # physical B fires the "A" bit
     "Y": e.BTN_NORTH,
     "L": e.BTN_TL,
     "R": e.BTN_TR,
