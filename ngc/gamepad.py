@@ -199,8 +199,19 @@ DEFAULT_BUTTON_MAP = PRO_BUTTON_MAP
 # (physical -> shown for A, B, X, and Y all in the same session) rather than
 # assuming a fixed label function carries over between sessions -- it hasn't
 # so far. Both sticks are used in their natural (upright) orientation -- no
-# solo-mode rotation. SL/SR/GL/GR have no function when paired like this on
-# a real Switch and are left unmapped.
+# solo-mode rotation.
+#
+# SL/SR have no function when paired like this on a real Switch console, but
+# the Joy-Cons keep reporting the bits over BLE regardless -- and SDL's own
+# combined-Joy-Con handling (SDL_JOYSTICK_HIDAPI_COMBINE_JOY_CONS) exposes
+# them as Paddle1-4 (right SR, left SL, right SL, left SR, in that order) so
+# Dolphin/SDL show this pad exactly like a real paired Joy-Con set. Routed to
+# BTN_TRIGGER_HAPPY1-4 here -- untested on hardware yet. BTN_TRIGGER_HAPPY1/2
+# broke Steam's recognition of the *solo* Joy-Con2 pad (see
+# JOYCON2_RIGHT_BUTTON_MAP above), which only declares a handful of buttons;
+# this combined pad already declares a full standard set, so the same
+# breakage is less likely but not confirmed -- verify Steam still recognises
+# the pad after this change. GL/GR still have no slot and are left unmapped.
 JOYCON2_COMBINED_BUTTON_MAP = {
     "X": e.BTN_WEST,    # physical A fires the "X" bit
     "B": e.BTN_SOUTH,   # physical X fires the "B" bit
@@ -220,6 +231,10 @@ JOYCON2_COMBINED_BUTTON_MAP = {
     "CAPTURE": e.BTN_Z,
     "L_STK": e.BTN_THUMBL,
     "R_STK": e.BTN_THUMBR,
+    "SR_R": e.BTN_TRIGGER_HAPPY1,  # right Joy-Con SR -> SDL Paddle1
+    "SL_L": e.BTN_TRIGGER_HAPPY2,  # left Joy-Con SL  -> SDL Paddle2
+    "SL_R": e.BTN_TRIGGER_HAPPY3,  # right Joy-Con SL -> SDL Paddle3
+    "SR_L": e.BTN_TRIGGER_HAPPY4,  # left Joy-Con SR  -> SDL Paddle4
 }
 
 # Joy-Con 2 (either side) presents a single physical stick; the uinput

@@ -255,6 +255,63 @@ def fix_joycon_left_mapping(mapping: str) -> str:
     return ",".join([guid, name, *buttons, *JOYCON2_LEFT_AXES])
 
 
+# Combined Left+Right Joy-Con 2 pair, presented as "Pro Controller 2"
+# (product=P.PRO_CONTROLLER2_PID, see bridge.py). Full dual-stick pad, no
+# single-stick axis trimming needed.
+COMBINED_AXES = (
+    "leftx:a0",
+    "lefty:a1",
+    "rightx:a3",
+    "righty:a4",
+    "platform:Linux",
+)
+
+
+def fix_combined_mapping(mapping: str) -> str:
+    """Build a complete gamecontrollerdb line for the combined Joy-Con pair.
+
+    Matches ngc/gamepad.py's JOYCON2_COMBINED_BUTTON_MAP evdev-code sort
+    order, so Dolphin (and anything else reading SDL_GameController) labels
+    this pad exactly like a real paired Joy-Con set: south/east/north/west
+    face buttons in Nintendo's physical B/A/X/Y positions, back=Minus,
+    start=Plus, guide=Home, misc1=Capture, and paddle1-4=right SR/left
+    SL/right SL/left SR (SDL's own combined-Joy-Con paddle order).
+    """
+    parts = mapping.split(",")
+    if len(parts) < 2:
+        return mapping
+    guid, name = parts[0], parts[1]
+    hat_tokens = [
+        token for token in parts[2:]
+        if token.split(":", 1)[0] in _KEEP_HAT_KEYS
+    ]
+    # b0=B(SOUTH) b1=A(EAST) b2=Y(NORTH) b3=X(WEST) b4=Capture b5=L b6=R
+    # b7=ZL b8=ZR b9=Minus b10=Plus b11=Home b12=L-stick b13=R-stick
+    # b14=SR_R(Paddle1) b15=SL_L(Paddle2) b16=SL_R(Paddle3) b17=SR_L(Paddle4)
+    buttons = [
+        "a:b1",
+        "b:b3",
+        "x:b2",
+        "y:b0",
+        "back:b9",
+        "start:b10",
+        "guide:b11",
+        "misc1:b4",
+        "leftshoulder:b5",
+        "rightshoulder:b6",
+        "lefttrigger:b7",
+        "righttrigger:b8",
+        "leftstick:b12",
+        "rightstick:b13",
+        "paddle1:b14",
+        "paddle2:b15",
+        "paddle3:b16",
+        "paddle4:b17",
+    ]
+    axis_tokens = list(COMBINED_AXES[:-1]) + hat_tokens + [COMBINED_AXES[-1]]
+    return ",".join([guid, name, *buttons, *axis_tokens])
+
+
 def mapping_for_pad(name: str, mapping: str | None) -> str | None:
     if not mapping:
         return None
@@ -265,6 +322,8 @@ def mapping_for_pad(name: str, mapping: str | None) -> str | None:
         return fix_joycon_right_mapping(mapping)
     if "joy-con 2" in low and "left" in low:
         return fix_joycon_left_mapping(mapping)
+    if "pro controller 2" in low:
+        return fix_combined_mapping(mapping)
     return mapping
 
 
