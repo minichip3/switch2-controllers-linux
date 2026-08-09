@@ -381,13 +381,19 @@ class _PairCoordinator:
     """Merges a Left+Right Joy-Con 2 pair (same player slot) into one full
     dual-stick virtual gamepad, instead of each half getting its own.
 
-    Two independent _Worker instances (one per physical Joy-Con) each keep
-    managing their own BLE connection/reconnection through the normal hub
-    path; only gamepad/motion/DSU ownership is redirected here.
+    One instance per player slot (Bridge keys them by slot, see
+    Bridge.get_or_create_joycon_pair), so multiple simultaneous pairs (P1
+    dual + P2 dual, for local multiplayer) are supported. Two independent
+    _Worker instances (one per physical Joy-Con) each keep managing their
+    own BLE connection/reconnection through the normal hub path; only
+    gamepad/motion/DSU ownership is redirected here. Which worker feeds
+    which pair (or neither, i.e. solo) is decided live by
+    Bridge._retopologize(), so this can change without a BLE reconnect.
     """
 
     def __init__(
         self,
+        slot: int,
         player: int,
         config: Config,
         dsu: Optional[DSUServer],
@@ -397,7 +403,7 @@ class _PairCoordinator:
         self.config = config
         self.dsu = dsu
         self.on_topology_change = on_topology_change
-        self.slot = max(0, min(3, player - 1))
+        self.slot = slot
         self.gamepad: Optional[SwitchGamepad] = None
         self.motion: Optional[MotionEvdev] = None
         self._sides: dict[str, "_Worker"] = {}
@@ -574,30 +580,18 @@ class _Worker:
             logger.debug("rumble failed: %s", exc)
 
     def _ensure_gamepad(self, ctrl: SwitchController) -> None:
+        """Create/refresh this worker's own solo virtual pad.
+
+        Whether it actually stays solo or gets folded into a combined pair
+        is decided separately, live, by Bridge._retopologize() (called right
+        after this from activate(), and again on every state-loop tick) --
+        not here, so that a later player-slot change can flip the mode
+        without a BLE reconnect.
+        """
         pid = ctrl.product_id
-        if self.config.dual_mode and self.hub.bridge is not None:
-            side = _PairCoordinator.side_for_pid(pid)
-            if side is not None:
-                pair = self.hub.bridge.get_or_create_joycon_pair()
-                ctrl.combined_mode = True
-                self.pair = pair
-                self._pair_side = side
-                pair.activate_side(side, self)
-                logger.info(
-                    "dual mode: %s joined as %s half of the combined pad",
-                    self.entry.mac, side,
-                )
-                return
         if self.gamepad is not None and self._gamepad_product == pid:
             return
-        if self.gamepad is not None:
-            self.gamepad.rumble_cb = None
-            self.gamepad.close()
-            self.gamepad = None
-            self._gamepad_product = None
-        if self.motion is not None:
-            self.motion.close()
-            self.motion = None
+        self._close_gamepad()
         name = f"{ctrl.name} (P{self.entry.player})"
         self.gamepad = SwitchGamepad(
             name=name,
@@ -608,6 +602,58 @@ class _Worker:
         self.motion = MotionEvdev(name, self.entry.mac, product=pid)
         self._gamepad_product = pid
         logger.info("virtual gamepad ready: %s", name)
+
+    def _close_gamepad(self) -> None:
+        if self.gamepad is not None:
+            self.gamepad.rumble_cb = None
+            self.gamepad.close()
+            self.gamepad = None
+            self._gamepad_product = None
+        if self.motion is not None:
+            self.motion.close()
+            self.motion = None
+
+    def join_pair(self, pair: "_PairCoordinator", side: str) -> None:
+        """Switch this worker from solo (or a different pair) into `pair`,
+        live -- no BLE reconnect. Called only by Bridge._retopologize()."""
+        if self._pair_side == side and self.pair is pair:
+            return
+        if self._pair_side is not None:
+            self.leave_pair(_retopo_will_follow=True)
+        else:
+            self._close_gamepad()
+        ctrl = self.controller
+        if ctrl is not None:
+            ctrl.combined_mode = True
+        self.pair = pair
+        self._pair_side = side
+        pair.activate_side(side, self)
+        logger.info(
+            "dual mode: %s joined as %s half of the combined pad (P%d)",
+            self.entry.mac, side, pair.player,
+        )
+
+    def leave_pair(self, *, _retopo_will_follow: bool = False) -> None:
+        """Switch this worker back to a solo pad, live -- no BLE reconnect.
+        Called only by Bridge._retopologize() (directly, or via join_pair()
+        when moving straight from one pair to another)."""
+        if self._pair_side is None or self.pair is None:
+            return
+        pair, side = self.pair, self._pair_side
+        self.pair = None
+        self._pair_side = None
+        pair.teardown_side(side, full=True)
+        ctrl = self.controller
+        if ctrl is not None:
+            ctrl.combined_mode = False
+        if not _retopo_will_follow and ctrl is not None and self.is_connected():
+            self._ensure_gamepad(ctrl)
+            if self.gamepad is not None and self.config.enable_rumble:
+                self.gamepad.rumble_cb = self._on_rumble
+            if self.dsu is not None:
+                self.dsu.set_slot(self.slot, True, mac=self.entry.mac,
+                                   battery_mv=ctrl.battery_mv or 0)
+            logger.info("dual mode: %s split back to a solo pad", self.entry.mac)
 
     def config_button_map(self, product_id: int):
         from .gamepad import button_map_for_product
@@ -638,9 +684,15 @@ class _Worker:
                 logger.info("bonded %s to %s", mac, self.config.adapter_mac)
             self.controller = ctrl
             self._ensure_gamepad(ctrl)
+            if self.hub.bridge is not None:
+                # May immediately fold this worker into a combined pad if a
+                # same-slot opposite-side Joy-Con is already connected --
+                # see Bridge._retopologize(). Sets self._pair_side as a
+                # side effect, so check it fresh below.
+                self.hub.bridge._retopologize()
             if self._pair_side is None:
                 # Paired mode already wired up rumble/DSU/topology in
-                # _PairCoordinator.activate_side().
+                # _PairCoordinator.activate_side() (via _retopologize above).
                 if self.gamepad is not None and self.config.enable_rumble:
                     self.gamepad.rumble_cb = self._on_rumble
                 if self.dsu is not None:
@@ -728,21 +780,91 @@ class Bridge:
         self._reorder_timer: Optional[threading.Timer] = None
         self._reorder_lock = threading.Lock()
         self._state_lock = threading.Lock()
-        self._joycon_pair: Optional[_PairCoordinator] = None
+        # Keyed by 0-based player slot so multiple simultaneous pairs (P1
+        # dual + P2 dual, local multiplayer) are possible. Which worker
+        # feeds which pair -- or none, i.e. solo -- is decided live by
+        # _retopologize(), not at connect time, so a player-slot change
+        # (e.g. from led-players.json) can flip dual/single mode without a
+        # BLE reconnect or service restart.
+        self._joycon_pairs: dict[int, _PairCoordinator] = {}
         self._joycon_pair_lock = threading.Lock()
+        # Non-reentrant lock: _retopologize() can be re-entered from within
+        # itself (join_pair/leave_pair fire on_topology_change -> here
+        # again) via two different threads (a hub connect thread and the
+        # ngc-state timer thread), so a plain bool flag isn't safe here.
+        self._retopo_lock = threading.Lock()
 
-    def get_or_create_joycon_pair(self) -> _PairCoordinator:
-        """Dual mode's single Left+Right Joy-Con 2 pair, created lazily on
-        whichever half connects first. Both halves share this same instance
-        regardless of connection order or their individually configured
-        player slots."""
+    def get_or_create_joycon_pair(self, slot: int, player: int) -> _PairCoordinator:
+        """The Left+Right Joy-Con 2 pair for one player slot, created lazily
+        on whichever half first needs it. Reused (not recreated) across
+        combine/split/recombine cycles for the same slot."""
         with self._joycon_pair_lock:
-            if self._joycon_pair is None:
-                player = min((e.player for e in self.config.entries()), default=1)
-                self._joycon_pair = _PairCoordinator(
-                    player, self.config, self.dsu, self._schedule_reorder
+            pair = self._joycon_pairs.get(slot)
+            if pair is None:
+                pair = _PairCoordinator(
+                    slot, player, self.config, self.dsu, self._on_topology_change
                 )
-            return self._joycon_pair
+                self._joycon_pairs[slot] = pair
+            else:
+                pair.player = player
+            return pair
+
+    def _on_topology_change(self) -> None:
+        self._retopologize()
+        self._schedule_reorder()
+
+    def _retopologize(self) -> None:
+        """Reconcile Joy-Con L/R combine/split with each connected
+        controller's *current* effective player slot.
+
+        Runs live, with no BLE reconnect and no service restart -- only the
+        affected worker's virtual pad is closed and reopened. Two Joy-Cons
+        (one left, one right) sharing a slot combine into one dual-stick
+        pad; anything else -- including a lone half whose partner just
+        disconnected or moved to a different slot -- ends up solo. Called
+        after every connect/disconnect (via on_topology_change) and once per
+        state-loop tick, so a led-players.json slot change (see
+        _apply_led_overrides) takes effect within one tick, not just at the
+        next reconnect.
+        """
+        if not self.config.dual_mode:
+            return
+        if not self._retopo_lock.acquire(blocking=False):
+            return
+        try:
+            left_by_slot: dict[int, _Worker] = {}
+            right_by_slot: dict[int, _Worker] = {}
+            for worker in self.workers:
+                ctrl = worker.controller
+                if ctrl is None or not worker.is_connected():
+                    continue
+                side = _PairCoordinator.side_for_pid(ctrl.product_id)
+                if side is None:
+                    continue
+                slot = max(0, min(3, worker.effective_player() - 1))
+                (left_by_slot if side == "left" else right_by_slot)[slot] = worker
+
+            paired_slots = set(left_by_slot) & set(right_by_slot)
+
+            for slot in paired_slots:
+                left, right = left_by_slot[slot], right_by_slot[slot]
+                player = min(left.effective_player(), right.effective_player())
+                pair = self.get_or_create_joycon_pair(slot, player)
+                if left.pair is not pair or left._pair_side != "left":
+                    left.join_pair(pair, "left")
+                if right.pair is not pair or right._pair_side != "right":
+                    right.join_pair(pair, "right")
+
+            for worker in self.workers:
+                ctrl = worker.controller
+                if ctrl is None or not worker.is_connected() or worker._pair_side is None:
+                    continue
+                side = _PairCoordinator.side_for_pid(ctrl.product_id)
+                slot = max(0, min(3, worker.effective_player() - 1))
+                if side is None or slot not in paired_slots:
+                    worker.leave_pair()
+        finally:
+            self._retopo_lock.release()
 
     def _battery_pct(self, mv: Optional[int]) -> Optional[int]:
         if not mv:
@@ -828,6 +950,10 @@ class Bridge:
         while not self._stop.wait(_STATUS_INTERVAL_S):
             try:
                 self._apply_led_overrides()
+                # Picks up player-slot changes even without a fresh
+                # connect/disconnect event (e.g. led-players.json rewritten
+                # by the LED-sync tool while both halves stay connected).
+                self._retopologize()
                 self._publish_state()
             except Exception as exc:  # noqa: BLE001
                 logger.debug("state publish failed: %s", exc)
@@ -858,7 +984,12 @@ class Bridge:
         threading.Thread(target=self._state_loop, name="ngc-state", daemon=True).start()
         logger.info("starting %d controller worker(s)", len(entries))
         if self.config.dual_mode:
-            logger.info("dual mode enabled: a connected Joy-Con 2 Left+Right pair will merge into one pad")
+            logger.info(
+                "dual mode enabled: Joy-Con 2 Left+Right pairs sharing a player "
+                "slot merge into one pad; this is re-evaluated live, so changing "
+                "either half's player slot re-splits or re-merges it without a "
+                "reconnect"
+            )
 
         for entry in entries:
             worker = _Worker(
@@ -867,7 +998,7 @@ class Bridge:
                 self._stop,
                 self.hub,
                 dsu=self.dsu,
-                on_topology_change=self._schedule_reorder,
+                on_topology_change=self._on_topology_change,
             )
             self.workers.append(worker)
             threading.Thread(target=worker.run, name=f"ctrl-{entry.player}", daemon=True).start()

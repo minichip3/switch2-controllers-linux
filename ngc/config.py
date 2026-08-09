@@ -49,10 +49,15 @@ class Config:
     button_map: dict = field(default_factory=dict)
     # Rumble: GameCube uses safe presets; Pro/Joy-Con use the real HD motor.
     enable_rumble: bool = True
-    # When true, any connected Left+Right Joy-Con 2 pair is merged into one
-    # combined virtual gamepad regardless of their configured player slots
-    # (see bridge.Bridge.get_or_create_joycon_pair). Off by default: each
-    # Joy-Con stays its own solo pad.
+    # When true, a connected Left+Right Joy-Con 2 pair that share the same
+    # *effective* player slot (ControllerEntry.player, or a live
+    # led-players.json override -- see bridge._Worker.effective_player) are
+    # merged into one combined virtual gamepad; a pair on different slots
+    # stays two solo pads. This is re-evaluated live on every state-loop
+    # tick and on every connect/disconnect (see Bridge._retopologize), so
+    # changing either half's player slot flips combined/solo without a BLE
+    # reconnect or service restart. Off by default: every Joy-Con always
+    # stays its own solo pad, regardless of player slot.
     dual_mode: bool = False
     # Legacy single-controller fields (migrated into `controllers` on load).
     controller_mac: Optional[str] = None
