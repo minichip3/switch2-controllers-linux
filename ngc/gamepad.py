@@ -186,20 +186,20 @@ DEFAULT_BUTTON_MAP = PRO_BUTTON_MAP
 
 # A paired Left+Right Joy-Con 2 set, merged by the bridge into one full
 # dual-stick pad (see bridge._PairCoordinator), presented to Steam as a
-# Pro Controller 2 (product=P.PRO_CONTROLLER2_PID) -- that PID is already
-# recognized and tested in this project using Xbox-style positions
-# (PRO_BUTTON_MAP: A=south, B=east, X=west, Y=north), unlike solo Joy-Con 2's
-# Nintendo-position convention. So ABXY here targets those same Xbox
-# positions, still compensating for this physical unit's hardware bit
-# rotation (see JOYCON2_RIGHT_BUTTON_MAP): physical A fires the "X" bit,
-# physical X fires the "B" bit, physical B fires the "A" bit, Y is
-# unaffected. Both sticks are used in their natural (upright) orientation --
-# no solo-mode rotation. SL/SR/GL/GR have no function when paired like this
-# on a real Switch and are left unmapped.
+# Pro Controller 2 (product=P.PRO_CONTROLLER2_PID). Compensates for this
+# physical unit's hardware bit rotation (see JOYCON2_RIGHT_BUTTON_MAP):
+# physical A fires the "X" bit, physical X fires the "B" bit, physical B
+# fires the "A" bit, Y is unaffected. Confirmed on hardware: for this PID,
+# Steam's face-button labels are EAST="X"/WEST="B" -- East/West swapped from
+# plain Xbox convention (unlike solo Joy-Con2's own PID) -- so the "A"/"B"
+# keys target WEST/EAST respectively to land correctly. Both sticks are used
+# in their natural (upright) orientation -- no solo-mode rotation. SL/SR/
+# GL/GR have no function when paired like this on a real Switch and are
+# left unmapped.
 JOYCON2_COMBINED_BUTTON_MAP = {
     "X": e.BTN_SOUTH,   # physical A fires the "X" bit
-    "B": e.BTN_WEST,    # physical X fires the "B" bit
-    "A": e.BTN_EAST,    # physical B fires the "A" bit
+    "B": e.BTN_EAST,    # physical X fires the "B" bit
+    "A": e.BTN_WEST,    # physical B fires the "A" bit
     "Y": e.BTN_NORTH,
     "L": e.BTN_TL,
     "R": e.BTN_TR,
