@@ -213,13 +213,11 @@ JOYCON2_COMBINED_BUTTON_MAP = {
     "PLUS": e.BTN_START,
     "MINUS": e.BTN_SELECT,
     "HOME": e.BTN_MODE,
-    # Trying BTN_MISC for a "Share"-style label (Dolphin showed plain
-    # "Button 4" on BTN_Z, which works but isn't a recognized name).
-    # BTN_MISC is outside the normal gamepad button range, same class of
-    # code as BTN_TRIGGER_HAPPY1/2 which broke Steam's device recognition
-    # wholesale for solo Joy-Con2 -- revert CAPTURE to BTN_Z immediately if
-    # anything else (PLUS/HOME/ABXY/etc.) misbehaves after this change.
-    "CAPTURE": e.BTN_MISC,
+    # BTN_MISC was tried here for a "Share"-style label, but -- like
+    # BTN_TRIGGER_HAPPY1/2 on solo Joy-Con2 -- an evdev code outside the
+    # normal gamepad button range broke Steam's recognition of the whole
+    # device. Back to BTN_Z: no fancy label, but a plain, stable signal.
+    "CAPTURE": e.BTN_Z,
     "L_STK": e.BTN_THUMBL,
     "R_STK": e.BTN_THUMBR,
 }
