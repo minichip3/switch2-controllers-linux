@@ -87,19 +87,30 @@ GAMECUBE_BUTTON_MAP = {
 # HOME, or analog triggers -- those live on the Right half or the grip --
 # so this deliberately only covers what the Left half actually has, instead
 # of reusing PRO_BUTTON_MAP (which declared all of those as dead
-# capabilities and had no slot at all for SL/SR). Slot choices (SL/SR on the
-# shoulder codes, MINUS on START, CAPTURE on the guide code) come from SDL's
-# own solo/"mini controller" handling (`HandleMiniControllerStateL`, Valve's
-# SDL contribution) rather than guesswork -- confirmed there against the
-# joyfusion project's identical solo Joy-Con 2 support.
+# capabilities and had no slot at all for SL/SR).
+#
+# Slot choices mirror the upstream kernel `hid-nintendo` driver's
+# `left_joycon_button_mappings` (the "Joy-Con 1" convention) rather than
+# Steam Input's Joy-Con-2-specific SDL profile: SL/SR reuse the *opposite*
+# side's unused shoulder/trigger slots (SL->TR, SR->TR2) while this half's
+# own L/ZL take the same-side slots (L->TL, ZL->TL2); MINUS->SELECT,
+# CAPTURE->Z. D-pad is four discrete BTN_DPAD_* buttons, not a Hat0X/Y
+# axis -- also matching what the real driver sends, confirmed against
+# Steam's own device capability listing on real hardware (in exactly this
+# order: Z, TL, TR, TL2, TR2, SELECT, THUMBL, DPAD_UP/DOWN/LEFT/RIGHT, then
+# two plain stick axes, no hat).
 JOYCON2_LEFT_BUTTON_MAP = {
-    "SL_L": e.BTN_TL,
-    "SR_L": e.BTN_TR,
-    "L": e.BTN_TL2,
-    "ZL": e.BTN_TR2,
-    "MINUS": e.BTN_START,
-    "CAPTURE": e.BTN_MODE,
+    "CAPTURE": e.BTN_Z,
+    "L": e.BTN_TL,
+    "SL_L": e.BTN_TR,
+    "ZL": e.BTN_TL2,
+    "SR_L": e.BTN_TR2,
+    "MINUS": e.BTN_SELECT,
     "L_STK": e.BTN_THUMBL,
+    "UP": e.BTN_DPAD_UP,
+    "DOWN": e.BTN_DPAD_DOWN,
+    "LEFT": e.BTN_DPAD_LEFT,
+    "RIGHT": e.BTN_DPAD_RIGHT,
 }
 
 DEFAULT_BUTTON_MAP = PRO_BUTTON_MAP
@@ -121,6 +132,11 @@ class SwitchGamepad:
     # dead trigger axes in Dolphin/Steam's device inspector.
     _HAS_RIGHT_STICK = {P.PRO_CONTROLLER2_PID, P.NSO_GAMECUBE_PID, P.JOYCON2_RIGHT_PID}
     _HAS_TRIGGER_AXES = {P.NSO_GAMECUBE_PID}  # only the GC pad has true analog L/R
+    # Solo Left Joy-Con sends its D-pad as four discrete buttons (see
+    # JOYCON2_LEFT_BUTTON_MAP), not a Hat0X/Y axis -- so it needs neither
+    # the hat capability nor the hardcoded hat emission in update()/
+    # release_all() below.
+    _DPAD_AS_BUTTONS = {P.JOYCON2_LEFT_PID}
 
     def __init__(
         self,
@@ -134,6 +150,7 @@ class SwitchGamepad:
 
         self._has_right_stick = product in self._HAS_RIGHT_STICK
         self._has_trigger_axes = product in self._HAS_TRIGGER_AXES
+        self._dpad_as_buttons = product in self._DPAD_AS_BUTTONS
         # The Left Joy-Con's stick reports its raw axes rotated 90 degrees
         # clockwise from what a standalone stick should read (pushing left
         # registered as up) -- confirmed on real hardware. Rotating the
@@ -145,9 +162,12 @@ class SwitchGamepad:
         abs_axes = [
             (e.ABS_X, AbsInfo(0, STICK_MIN, STICK_MAX, 0, 0, 0)),
             (e.ABS_Y, AbsInfo(0, STICK_MIN, STICK_MAX, 0, 0, 0)),
-            (e.ABS_HAT0X, AbsInfo(0, -1, 1, 0, 0, 0)),
-            (e.ABS_HAT0Y, AbsInfo(0, -1, 1, 0, 0, 0)),
         ]
+        if not self._dpad_as_buttons:
+            abs_axes += [
+                (e.ABS_HAT0X, AbsInfo(0, -1, 1, 0, 0, 0)),
+                (e.ABS_HAT0Y, AbsInfo(0, -1, 1, 0, 0, 0)),
+            ]
         if self._has_right_stick:
             abs_axes += [
                 (e.ABS_RX, AbsInfo(0, STICK_MIN, STICK_MAX, 0, 0, 0)),
@@ -225,14 +245,17 @@ class SwitchGamepad:
         for key_code, pressed in key_states.items():
             changed |= self._emit_key(key_code, pressed)
 
-        dpad_x = (1 if buttons & P.SWITCH_BUTTONS["RIGHT"] else 0) - (
-            1 if buttons & P.SWITCH_BUTTONS["LEFT"] else 0
-        )
-        dpad_y = (1 if buttons & P.SWITCH_BUTTONS["DOWN"] else 0) - (
-            1 if buttons & P.SWITCH_BUTTONS["UP"] else 0
-        )
-        changed |= self._emit_abs(e.ABS_HAT0X, dpad_x)
-        changed |= self._emit_abs(e.ABS_HAT0Y, dpad_y)
+        # Left Joy-Con's D-pad already went out as BTN_DPAD_* above, via
+        # button_map -- it has no Hat0X/Y capability to write to.
+        if not self._dpad_as_buttons:
+            dpad_x = (1 if buttons & P.SWITCH_BUTTONS["RIGHT"] else 0) - (
+                1 if buttons & P.SWITCH_BUTTONS["LEFT"] else 0
+            )
+            dpad_y = (1 if buttons & P.SWITCH_BUTTONS["DOWN"] else 0) - (
+                1 if buttons & P.SWITCH_BUTTONS["UP"] else 0
+            )
+            changed |= self._emit_abs(e.ABS_HAT0X, dpad_x)
+            changed |= self._emit_abs(e.ABS_HAT0Y, dpad_y)
 
         lx, ly = left_stick
         if self._rotate_left_stick_ccw90:
@@ -253,7 +276,9 @@ class SwitchGamepad:
         changed = False
         for code in list(self._last_keys):
             changed |= self._emit_key(code, 0)
-        neutral_axes = [(e.ABS_X, 0), (e.ABS_Y, 0), (e.ABS_HAT0X, 0), (e.ABS_HAT0Y, 0)]
+        neutral_axes = [(e.ABS_X, 0), (e.ABS_Y, 0)]
+        if not self._dpad_as_buttons:
+            neutral_axes += [(e.ABS_HAT0X, 0), (e.ABS_HAT0Y, 0)]
         if self._has_right_stick:
             neutral_axes += [(e.ABS_RX, 0), (e.ABS_RY, 0)]
         if self._has_trigger_axes:
