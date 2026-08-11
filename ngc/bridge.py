@@ -55,14 +55,15 @@ _SCAN_SETTLE_S = 0.10
 # Suppressed once before the connect starts and then left alone.
 _CONNECT_ATTEMPT_S = 3.0
 # Each dst_type tried costs ~1.5s (HCI-queue tax) + up to _CONNECT_ATTEMPT_S
-# regardless of outcome (see _connect_dst_with_polling), so total budget
-# here is _CONNECT_ATTEMPTS x len(dst_types tried) x ~4.5s. Once a pad's
-# dst_type is known (see _connect_sync's worker.last_dst_type), that's just
-# one type, so 2 attempts is ~9s -- inside the Joy-Con 2's ~10s wake-mode
-# advertising window. The scan loop retries on the pad's next advertisement
-# regardless, so a slower first-ever-pairing pass (unknown dst_type, both
-# tried) isn't fatal, just not expected to finish within one window.
-_CONNECT_ATTEMPTS = 2
+# regardless of outcome (see _connect_dst_with_polling), and both types are
+# always tried (see _connect_sync -- skipping the non-hinted type turned
+# out to be unsafe), so one outer attempt already costs ~9s -- close to
+# the Joy-Con 2's ~10s wake-mode advertising window on its own. 1 outer
+# attempt per _connect_sync call; the scan loop retries on the pad's next
+# advertisement regardless, so this just means a failed pass waits for
+# that next advertisement instead of burning through a second one here
+# that likely wouldn't fit in the same window anyway.
+_CONNECT_ATTEMPTS = 1
 
 
 def _adapter_index() -> str:
@@ -453,14 +454,20 @@ class _ConnectHub:
             return False, "no adapter configured"
         # Every dst_type tried costs a real ~1.5s HCI-queue tax on top of the
         # poll wait itself (see _connect_dst_with_polling), regardless of
-        # whether it succeeds -- trying both LE_PUBLIC and LE_RANDOM every
-        # single reconnect roughly doubles that cost for no reason once we
-        # already know which one this pad actually uses. Once we have that
-        # confirmed (worker.last_dst_type), only try it; if every attempt
-        # still fails, clear the hint so the next _connect_sync call (next
-        # scan pass) falls back to trying both again instead of getting
-        # stuck on a hint that stopped being true.
-        dst_types = (worker.last_dst_type,) if worker.last_dst_type is not None else (att.LE_PUBLIC, att.LE_RANDOM)
+        # whether it succeeds, so trying the previously-successful dst_type
+        # first (worker.last_dst_type) saves that cost in the common case.
+        # Tried skipping the *other* type entirely once a hint exists --
+        # reverted: on real hardware, a "wake"-mode advertisement (reconnect
+        # to a specific bonded host) failed fast with a real SO_ERROR right
+        # after this landed, immediately after a dst_type had just been
+        # learned from a "pairing"-mode connect -- consistent with wake and
+        # pairing mode not always using the same LE address type for the
+        # same physical pad. Always try both; only the *order* is hinted.
+        dst_types = (
+            (worker.last_dst_type, att.LE_RANDOM if worker.last_dst_type == att.LE_PUBLIC else att.LE_PUBLIC)
+            if worker.last_dst_type is not None
+            else (att.LE_PUBLIC, att.LE_RANDOM)
+        )
         with _CONNECT_LOCK:
             last_detail = "no attempts"
             for attempt in range(_CONNECT_ATTEMPTS):
