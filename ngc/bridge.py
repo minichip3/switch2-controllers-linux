@@ -429,11 +429,15 @@ class _ConnectHub:
         if not adapter:
             return False, "no adapter configured"
         with _CONNECT_LOCK:
-            _force_bt_inquiry_off()
             last_detail = "no attempts"
             for attempt in range(_CONNECT_ATTEMPTS):
-                if attempt and attempt % 4 == 0:
-                    _force_bt_inquiry_off()
+                # BR/EDR Inquiry restarts ~1s after being stopped (same-host
+                # btmon finding); each attempt window is up to ~0.9s, so
+                # re-stop it right before every attempt. Note: the cadence
+                # that wedged the adapter on hardware was a 0.3s background
+                # thread; once per ~0.9s attempt is 3x lighter than that
+                # while still staying inside the restart budget.
+                _force_bt_inquiry_off()
                 ctrl = SwitchController(mac, adapter)
                 for dst in (att.LE_PUBLIC, att.LE_RANDOM):
                     ok, detail = ctrl.att._connect_once(dst, _CONNECT_ATTEMPT_S)
