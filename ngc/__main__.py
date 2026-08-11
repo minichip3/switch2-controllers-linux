@@ -55,7 +55,9 @@ def _bond_sync(mac: str, player: int, adapter: str) -> bool:
         ctrl.close()
 
 
-async def _pair(cfg: Config, timeout: float, player: int | None = None) -> bool:
+async def _pair(
+    cfg: Config, timeout: float, player: int | None = None, role: str | None = None
+) -> bool:
     from .scanner import find_first
 
     print(
@@ -66,13 +68,23 @@ async def _pair(cfg: Config, timeout: float, player: int | None = None) -> bool:
     if not found:
         print("No controller found in pairing mode.")
         return False
+    if role and found.product_id not in (P.JOYCON2_LEFT_PID, P.JOYCON2_RIGHT_PID):
+        print(f"--role only applies to a solo Joy-Con 2 half, not {found.name}.")
+        return False
     if not cfg.adapter_mac:
         from .config import detect_adapter
 
         cfg.adapter_mac = detect_adapter()
-    entry = cfg.add_controller(found.device.address, name=found.name, player=player)
+    # --role left/right combines this Joy-Con 2 half with its other half into
+    # one P<player> pad instead of giving it a player slot of its own: pair
+    # the left half with `ngc pair --player 1 --role left`, then the right
+    # half with `ngc pair --player 1 --role right`.
+    entry = cfg.add_controller(found.device.address, name=found.name, player=player, pair_role=role)
     cfg.save()
-    print(f"Discovered {found.name} at {entry.mac} (player {entry.player}); bonding...")
+    if role:
+        print(f"Discovered {found.name} ({role}) at {entry.mac} (player {entry.player}); bonding...")
+    else:
+        print(f"Discovered {found.name} at {entry.mac} (player {entry.player}); bonding...")
     ok = await asyncio.get_event_loop().run_in_executor(
         None, _bond_sync, entry.mac, entry.player, cfg.adapter_mac
     )
@@ -125,7 +137,8 @@ def _list(cfg: Config) -> int:
     for e in entries:
         label = e.name or "Switch 2 Controller"
         bond = "bonded" if e.bonded else "needs bond (connect once with Sync)"
-        print(f"  P{e.player}  {e.mac}  {label}  [{bond}]")
+        slot = f"P{e.player} ({e.pair_role})" if e.pair_role else f"P{e.player}"
+        print(f"  {slot}  {e.mac}  {label}  [{bond}]")
     return 0
 
 
@@ -144,12 +157,32 @@ def _swap(cfg: Config, player_a: int, player_b: int) -> int:
     if not ca or not cb:
         print(f"Could not swap player {player_a} and {player_b} — check both are saved.")
         return 1
+    if ca.pair_role or cb.pair_role:
+        print("Can't swap a combined Joy-Con 2 pair slot — remove and re-pair both halves instead.")
+        return 1
     if not cfg.swap_players(player_a, player_b):
         return 1
     cfg.save()
     la = ca.name or ca.mac
     lb = cb.name or cb.mac
     print(f"Swapped: {la} is now P{player_b}, {lb} is now P{player_a}. Restart the bridge to apply.")
+    return 0
+
+
+def _role(cfg: Config, mac: str, player: int, role: str) -> int:
+    """Set an already-saved MAC's player slot / pair role -- config-only,
+    like `swap`, no Bluetooth involved (no need to re-pair/re-sync)."""
+    mac = mac.upper()
+    if not any(e.mac.upper() == mac for e in cfg.entries()):
+        print(f"{mac} is not in your saved list — pair it first.")
+        return 1
+    try:
+        entry = cfg.add_controller(mac, player=player, pair_role=role)
+    except ValueError as exc:
+        print(f"Could not set role: {exc}")
+        return 1
+    cfg.save()
+    print(f"{entry.mac} is now P{entry.player} ({role}). Restart the bridge to apply.")
     return 0
 
 
@@ -178,11 +211,15 @@ def _run(cfg: Config) -> int:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="ngc", description="Switch 2 controller bridge (GameCube / Pro Controller 2 / Joy-Con 2)")
     parser.add_argument("command", nargs="?", default="run",
-                        choices=["run", "pair", "rebond", "list", "remove", "swap"])
+                        choices=["run", "pair", "rebond", "list", "remove", "swap", "role"])
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--timeout", type=float, default=30.0, help="pairing scan timeout")
     parser.add_argument("--mac", help="controller MAC (for remove)")
     parser.add_argument("--player", type=int, help="player slot 1-8 (for pair)")
+    parser.add_argument(
+        "--role", choices=["left", "right"],
+        help="combine this Joy-Con 2 half with its other half into one player pad (for pair/role)",
+    )
     parser.add_argument("--players", nargs=2, type=int, metavar=("A", "B"), help="player slots to swap")
     args = parser.parse_args(argv)
     _setup_logging(args.verbose)
@@ -190,7 +227,7 @@ def main(argv=None) -> int:
     cfg = Config.load()
 
     if args.command == "pair":
-        return 0 if asyncio.run(_pair(cfg, args.timeout, args.player)) else 1
+        return 0 if asyncio.run(_pair(cfg, args.timeout, args.player, args.role)) else 1
 
     if args.command == "rebond":
         return 0 if asyncio.run(_rebond(cfg, args.timeout)) else 1
@@ -204,6 +241,12 @@ def main(argv=None) -> int:
     if args.command == "swap":
         a, b = (args.players if args.players else (1, 2))
         return _swap(cfg, a, b)
+
+    if args.command == "role":
+        if not args.mac or args.player is None or not args.role:
+            print("Usage: ngc role --mac AA:BB:CC:DD:EE:FF --player N --role left/right")
+            return 1
+        return _role(cfg, args.mac, args.player, args.role)
 
     if args.command == "list":
         return _list(cfg)

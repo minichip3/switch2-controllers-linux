@@ -281,12 +281,73 @@ def fix_joycon2_right_mapping(mapping: str) -> str:
     return ",".join([guid, name, *NGC_JOYCON2_RIGHT_BUTTONS, *NGC_JOYCON2_RIGHT_AXES])
 
 
+# Combined left+right Joy-Con 2 pair (bridge.py _PairGroup, virtual PID
+# JOYCON2_PAIR_PID). This is 미니's own hand-tuned layout from Steam's
+# personalization UI -- same deal as the solo halves (Steam special-cases
+# the Nintendo vendor and ignores gamecontrollerdb for it, so this DB line
+# serves SDL-based emulators / non-Steam SDL consumers while Steam keeps
+# using the personalization cached in its configset_57e-2068-*.vdf),
+# captured verbatim so `--write` reproduces exactly what Steam shows for
+# this device:
+#   a:b0 b:b1 y:b2 x:b3 = face buttons by position (Nintendo diamond),
+#   misc1:b4 = CAPTURE slot, leftshoulder:b5 L, rightshoulder:b6 R,
+#   lefttrigger:b7 ZL, righttrigger:b8 ZR, back:b9 MINUS, start:b10 PLUS,
+#   guide:b11 HOME, leftstick:b12 rightstick:b13, dpup/down/left/right
+#   b14-b17, leftx:a1~ lefty:a0 (primary axes swapped + inverted, same
+#   pattern as the solo Right half), rightx:a2 righty:a3.
+#
+# Note the b indices are one higher than the evdev code-order count in
+# ngc/gamepad.py (18 slots b0-b17 here vs 17 declared buttons) -- Steam
+# enumerates this device with one extra button slot (b4, which lands in
+# misc1). Reproduced verbatim rather than "corrected": this is what Steam
+# actually verified against, same as the solo halves' lines.
+NGC_JOYCON2_PAIR_TOKENS = (
+    "crc:c569",
+    "platform:Linux",
+    "b:b1",
+    "a:b0",
+    "y:b2",
+    "x:b3",
+    "dpleft:b16",
+    "dpright:b17",
+    "dpup:b14",
+    "dpdown:b15",
+    "leftx:a1~",
+    "lefty:a0",
+    "leftstick:b12",
+    "rightx:a2",
+    "righty:a3",
+    "rightstick:b13",
+    "leftshoulder:b5",
+    "lefttrigger:b7",
+    "rightshoulder:b6",
+    "righttrigger:b8",
+    "back:b9",
+    "start:b10",
+    "guide:b11",
+    "misc1:b4",
+    "hint:!SDL_GAMECONTROLLER_USE_BUTTON_LABELS:=1",
+    "steam:2",
+)
+
+
+def fix_joycon2_pair_mapping(mapping: str) -> str:
+    """Build a complete gamecontrollerdb line for the combined Joy-Con 2 pair pad."""
+    parts = mapping.split(",")
+    if len(parts) < 2:
+        return mapping
+    guid, name = parts[0], parts[1]
+    return ",".join([guid, name, *NGC_JOYCON2_PAIR_TOKENS])
+
+
 def mapping_for_pad(name: str, mapping: str | None) -> str | None:
     if not mapping:
         return None
     lname = name.lower()
     if "gamecube" in lname:
         return fix_gamecube_mapping(mapping)
+    if "joy-con 2 (pair)" in lname:
+        return fix_joycon2_pair_mapping(mapping)
     if "joy-con 2 (left)" in lname:
         return fix_joycon2_left_mapping(mapping)
     if "joy-con 2 (right)" in lname:
