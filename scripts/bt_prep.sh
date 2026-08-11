@@ -13,13 +13,6 @@ pkill -f decky-bluetooth-wake-control 2>/dev/null && echo "stopped decky bt-wake
 bluetoothctl scan off >/dev/null 2>&1 || true
 busctl call org.bluez /org/bluez/hci0 org.bluez.Adapter1 StopDiscovery >/dev/null 2>&1 || true
 
-# Steam owns a permanent discovery session that re-triggers the BR/EDR
-# Inquiry ~1s after we stop it; disable Steam's own Bluetooth discovery so
-# it stops contending (config.vdf patch, idempotent, timestamped backup).
-if python3 "$(cd "$(dirname "$0")" && pwd)/disable-steam-bluetooth.py" 2>/dev/null | grep -q "disabled Steam Bluetooth"; then
-  echo "Steam Bluetooth discovery disabled (config.vdf patched)"
-fi
-
 # Steam owns a permanent discovery session; StopDiscovery can't clear it.
 # btmgmt stop-find -b stops the BR/EDR Inquiry (the real interference -- see
 # ngc/bridge.py _force_bt_inquiry_off) at the HCI layer.
