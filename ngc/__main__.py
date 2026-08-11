@@ -169,6 +169,23 @@ def _swap(cfg: Config, player_a: int, player_b: int) -> int:
     return 0
 
 
+def _role(cfg: Config, mac: str, player: int, role: str) -> int:
+    """Set an already-saved MAC's player slot / pair role -- config-only,
+    like `swap`, no Bluetooth involved (no need to re-pair/re-sync)."""
+    mac = mac.upper()
+    if not any(e.mac.upper() == mac for e in cfg.entries()):
+        print(f"{mac} is not in your saved list — pair it first.")
+        return 1
+    try:
+        entry = cfg.add_controller(mac, player=player, pair_role=role)
+    except ValueError as exc:
+        print(f"Could not set role: {exc}")
+        return 1
+    cfg.save()
+    print(f"{entry.mac} is now P{entry.player} ({role}). Restart the bridge to apply.")
+    return 0
+
+
 def _run(cfg: Config) -> int:
     from .bridge import Bridge
 
@@ -194,14 +211,14 @@ def _run(cfg: Config) -> int:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="ngc", description="Switch 2 controller bridge (GameCube / Pro Controller 2 / Joy-Con 2)")
     parser.add_argument("command", nargs="?", default="run",
-                        choices=["run", "pair", "rebond", "list", "remove", "swap"])
+                        choices=["run", "pair", "rebond", "list", "remove", "swap", "role"])
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--timeout", type=float, default=30.0, help="pairing scan timeout")
     parser.add_argument("--mac", help="controller MAC (for remove)")
     parser.add_argument("--player", type=int, help="player slot 1-8 (for pair)")
     parser.add_argument(
         "--role", choices=["left", "right"],
-        help="combine this Joy-Con 2 half with its other half into one player pad (for pair)",
+        help="combine this Joy-Con 2 half with its other half into one player pad (for pair/role)",
     )
     parser.add_argument("--players", nargs=2, type=int, metavar=("A", "B"), help="player slots to swap")
     args = parser.parse_args(argv)
@@ -224,6 +241,12 @@ def main(argv=None) -> int:
     if args.command == "swap":
         a, b = (args.players if args.players else (1, 2))
         return _swap(cfg, a, b)
+
+    if args.command == "role":
+        if not args.mac or args.player is None or not args.role:
+            print("Usage: ngc role --mac AA:BB:CC:DD:EE:FF --player N --role left/right")
+            return 1
+        return _role(cfg, args.mac, args.player, args.role)
 
     if args.command == "list":
         return _list(cfg)
