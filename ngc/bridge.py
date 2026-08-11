@@ -402,6 +402,13 @@ class _ConnectHub:
                                         w.reconnect_failures = 0
                                     hub._last_seen.clear()
                                     hub._logged.clear()
+                                    # Adapter needs a moment to re-init;
+                                    # bail out of this pass -- the scan
+                                    # loop will re-see the pads on their
+                                    # next advertisement. Also avoids the
+                                    # KeyError the cleared _last_seen would
+                                    # cause on the next pending mac.
+                                    break
 
                 for mac, (seen_at, _) in list(hub._last_seen.items()):
                     if now - seen_at > seen_ttl_s:
