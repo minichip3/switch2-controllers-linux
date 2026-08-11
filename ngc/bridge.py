@@ -314,21 +314,15 @@ class _ConnectHub:
                         worker = hub.workers_by_mac.get(mac)
                         if worker is not None and not worker.is_connected():
                             _bluez_remove_device(mac)
-                    # Real-hardware finding, ported from the sibling joyfusion
-                    # project (same underlying issue -- same "first connect
-                    # after service start works, reconnect after a disconnect
-                    # fails" pattern confirmed on this project's own logs
-                    # too): the kernel/BlueZ hasn't finished tearing down the
-                    # just-removed device's old L2CAP/ATT association yet
-                    # when the next connect starts right after. joyfusion
-                    # needed 500ms, then found even that wasn't enough once
-                    # retries got faster (EBUSY -- a genuinely concurrent
-                    # connect-in-flight kernel error, not stale data) and
-                    # settled on 1.5s. The 80ms this used to be is nowhere
-                    # close. This is the *only* change in this pass, isolated
-                    # from the BR/EDR-flag and stdin-handling changes tried
-                    # (and reverted) earlier, to judge it cleanly on its own.
-                    await asyncio.sleep(1.5)
+                    # Reconnect settle (joyfusion finding): the kernel/BlueZ
+                    # hasn't finished tearing down the just-removed device's
+                    # old L2CAP/ATT association when the next connect starts
+                    # right after; joyfusion settled on 1.5s (500ms wasn't
+                    # enough once retries got faster -- EBUSY). Applied ONLY
+                    # to genuine reconnects (ever_connected); a first-ever
+                    # connect must dial immediately, the Joy-Con 2 advertises
+                    # for only ~10s when woken and a 1.5s delay makes it miss
+                    # that window entirely.
                 async with hub._connect_lock:
                     for mac in pending:
                         worker = hub.workers_by_mac.get(mac)
@@ -336,6 +330,8 @@ class _ConnectHub:
                             hub._logged.discard(mac)
                             hub._last_seen.pop(mac, None)
                             continue
+                        if worker.ever_connected:
+                            await asyncio.sleep(1.5)
                         mode = hub._last_seen[mac][1]
                         try:
                             ok, detail = await hub._loop.run_in_executor(
@@ -417,6 +413,11 @@ class _Worker:
         self._disconnected = threading.Event()
         self._ready = threading.Event()
         self._led_player: Optional[int] = None
+        # Set once this mac has ever completed activate() successfully.
+        # Distinguishes a real reconnect (needs the settle delay below --
+        # see _scan_loop) from this process's first-ever connect to it,
+        # which has no stale BlueZ/kernel L2CAP state to wait out.
+        self.ever_connected = False
 
     def is_connected(self) -> bool:
         return self.controller is not None and self.controller.is_connected
@@ -510,6 +511,7 @@ class _Worker:
                 self.on_topology_change()
             if self.hub.bridge is not None:
                 self.hub.bridge._publish_state()
+            self.ever_connected = True
             return True
         except Exception as exc:  # noqa: BLE001
             logger.error("session setup failed for %s: %s", mac, exc)
