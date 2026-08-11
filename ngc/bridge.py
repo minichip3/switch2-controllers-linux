@@ -113,6 +113,8 @@ def _adapter_index() -> str:
 _BTMGMT_LOCK = threading.Lock()
 _LAST_BT_INQUIRY_OFF = 0.0
 _BT_INQUIRY_OFF_MIN_INTERVAL_S = 0.35
+_LAST_BT_LE_SCAN_OFF = 0.0
+_BT_LE_SCAN_OFF_MIN_INTERVAL_S = 0.35
 
 
 def _run_quiet(cmd: list[str], *, timeout: float = 2.0) -> None:
@@ -175,21 +177,25 @@ def _force_bt_inquiry_off(*, force: bool = False) -> None:
             pass
 
 
-def _force_bt_le_scan_off() -> None:
+def _force_bt_le_scan_off(*, force: bool = False) -> None:
     """HCI-level LE scan stop (btmgmt stop-find -l).
 
     D-Bus StopDiscovery only ends *our* session, so when another client
     (Steam Input, decky-bluetooth-wake-control) holds the adapter's LE
     discovery and our scanner.start() gets [org.bluez.Error.InProgress],
     btmgmt is the only way to clear it at the HCI level. Shares the
-    btmgmt lock/throttle with _force_bt_inquiry_off. Never raises.
+    ``_BTMGMT_LOCK`` with _force_bt_inquiry_off (serializes the two btmgmt
+    calls) but has its own throttle timestamp -- the two target different
+    discovery types (LE vs BR/EDR) and _connect_dst_with_polling now fires
+    both back-to-back before every connect attempt, so a shared timer would
+    silently skip the second call every time. Never raises.
     """
-    global _LAST_BT_INQUIRY_OFF
+    global _LAST_BT_LE_SCAN_OFF
     now = time.monotonic()
     with _BTMGMT_LOCK:
-        if (now - _LAST_BT_INQUIRY_OFF) < _BT_INQUIRY_OFF_MIN_INTERVAL_S:
+        if not force and (now - _LAST_BT_LE_SCAN_OFF) < _BT_LE_SCAN_OFF_MIN_INTERVAL_S:
             return
-        _LAST_BT_INQUIRY_OFF = now
+        _LAST_BT_LE_SCAN_OFF = now
         idx = _adapter_index()
         try:
             proc = subprocess.Popen(
@@ -680,8 +686,17 @@ class _ConnectHub:
         before starting the connect, and then leaving the pending connect
         alone for the whole wait avoids that self-inflicted stall -- even
         though Inquiry may creep back in before this wait ends.
+
+        Clears both discovery types before starting: BR/EDR Inquiry
+        (_force_bt_inquiry_off, the confirmed interference source) and LE
+        scan (_force_bt_le_scan_off) in case something is also holding LE
+        discovery at this exact moment -- untested until now, cheap to
+        clear, and each call is a no-op if that type isn't actually active.
+        Both run here (before the connect starts), never during the poll --
+        see above for why mid-poll btmgmt calls are actively harmful.
         """
         _force_bt_inquiry_off()
+        _force_bt_le_scan_off()
         s, err = ctrl.att._start_connect(dst)
         if s is None:
             return False, err
