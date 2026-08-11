@@ -162,6 +162,15 @@ def _remove(cfg: Config, mac: str) -> int:
         print(f"Controller {mac} is not in your saved list.")
         return 1
     cfg.save()
+    # Give the pad back to BlueZ (wake-reconnect pads get Device1.Blocked
+    # set by the bridge) so it can be paired with something else -- or
+    # re-added here -- without bluetoothctl/Steam being unable to touch it.
+    try:
+        from .bridge import _bluez_unblock
+
+        _bluez_unblock(mac)
+    except Exception:  # noqa: BLE001 -- bridge import pulls bleak; non-fatal
+        pass
     print(f"Removed {mac.upper()}. Restart the bridge to apply.")
     return 0
 
