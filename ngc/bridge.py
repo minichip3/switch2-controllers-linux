@@ -46,8 +46,9 @@ logger = logging.getLogger(__name__)
 _CONNECT_LOCK = threading.Lock()
 _STATUS_INTERVAL_S = 1.5
 _SCAN_SETTLE_S = 0.10
-# Per-attempt L2CAP connect wait. Short windows fail when Steam keeps LE scan
-# busy; after btmgmt stop-find -l a few hundred ms is enough.
+# Per-attempt L2CAP connect wait. Short windows fail while BR/EDR Inquiry
+# is still creeping back in between _force_bt_inquiry_off() calls; a few
+# hundred ms is enough once it's actually off.
 _CONNECT_ATTEMPT_S = 0.45
 _CONNECT_ATTEMPTS = 16
 
@@ -58,8 +59,15 @@ def _adapter_index() -> str:
 
 
 _BTMGMT_LOCK = threading.Lock()
-_LAST_LE_SCAN_OFF = 0.0
-_LE_SCAN_OFF_MIN_INTERVAL_S = 0.35
+_LAST_BT_INQUIRY_OFF = 0.0
+_BT_INQUIRY_OFF_MIN_INTERVAL_S = 0.35
+
+# Consecutive failed reconnect passes for a pad that previously connected
+# before we power-cycle the adapter (see _power_cycle_adapter). Each pass is
+# _CONNECT_ATTEMPTS x _CONNECT_ATTEMPT_S ~ 7s, so this fires after ~15s of
+# continuous failure, matching the "only a power cycle clears it" symptom
+# observed on real hardware.
+_RECONNECT_FAILURES_BEFORE_POWER_CYCLE = 2
 
 
 def _run_quiet(cmd: list[str], *, timeout: float = 2.0) -> None:
@@ -75,28 +83,38 @@ def _run_quiet(cmd: list[str], *, timeout: float = 2.0) -> None:
         pass
 
 
-def _force_le_scan_off(*, force: bool = False) -> None:
-    """HCI-level LE discovery stop.
+def _force_bt_inquiry_off(*, force: bool = False) -> None:
+    """HCI-level BR/EDR Inquiry stop.
 
-    BlueZ ``StopDiscovery`` only ends *our* session. Steam/steamos-manager keeps
-    its own session forever (``Discovering`` stays true), which blocks raw L2CAP
-    create-connection. ``btmgmt stop-find -l`` stops the controller's LE scan
-    regardless of who started it. Requires passwordless ``sudo`` for btmgmt
-    (Bazzite default for this user).
+    Real-hardware root cause (same host, sibling joyfusion project's btmon
+    investigation): the interference that blocks raw L2CAP connect here was
+    never an *LE* scan despite this function's old name and old ``-l`` flag
+    -- bluetoothd (or something upstream; every external client candidate
+    was ruled out there) restarts ordinary BR/EDR ``Inquiry`` back-to-back,
+    a fresh one firing within ~1s of the previous ``Inquiry Complete``.
+    ``btmgmt stop-find -l`` against BR/EDR discovery returns "Invalid
+    Parameters" instantly (a type mismatch), which is exactly why the old
+    flag silently never helped. ``-b`` actually stops it (``Discovering``
+    flips to ``no``), just not for long, so callers keep re-calling this
+    around connect attempts (see _connect_sync).
+
+    BlueZ's D-Bus ``StopDiscovery`` only ends *our* session; ``btmgmt``
+    clears the HCI-level discovery regardless of who started it. Requires
+    passwordless ``sudo`` for btmgmt (Bazzite default for this user).
 
     Never raises — a hung btmgmt must not crash the bridge.
     """
-    global _LAST_LE_SCAN_OFF
+    global _LAST_BT_INQUIRY_OFF
     now = time.monotonic()
     with _BTMGMT_LOCK:
-        if not force and (now - _LAST_LE_SCAN_OFF) < _LE_SCAN_OFF_MIN_INTERVAL_S:
+        if not force and (now - _LAST_BT_INQUIRY_OFF) < _BT_INQUIRY_OFF_MIN_INTERVAL_S:
             return
-        _LAST_LE_SCAN_OFF = now
+        _LAST_BT_INQUIRY_OFF = now
         idx = _adapter_index()
         # Start detached-ish: kill hung btmgmt so we never block the hub.
         try:
             proc = subprocess.Popen(
-                ["sudo", "-n", "btmgmt", "-i", idx, "stop-find", "-l"],
+                ["sudo", "-n", "btmgmt", "-i", idx, "stop-find", "-b"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -110,6 +128,25 @@ def _force_le_scan_off(*, force: bool = False) -> None:
                     pass
         except Exception:  # noqa: BLE001
             pass
+
+
+def _power_cycle_adapter() -> None:
+    """Toggle adapter power to clear a wedged radio state.
+
+    Real-hardware finding (today): once reconnects start failing, "only a
+    Bluetooth power cycle recovers" the adapter -- no amount of
+    stop-find/settle retries gets a connect through. This automates that
+    manual recovery. Uses BlueZ D-Bus power toggle (no sudo needed) and
+    drops other Bluetooth devices for a moment; only called by the hub when
+    every previously-connected pad has failed to reconnect repeatedly, so
+    there's no live session to lose.
+
+    Never raises.
+    """
+    _run_quiet(["bluetoothctl", "power", "off"], timeout=3.0)
+    time.sleep(1.0)
+    _run_quiet(["bluetoothctl", "power", "on"], timeout=3.0)
+    time.sleep(2.0)
 
 
 def _bluez_remove_device(mac: str) -> None:
@@ -140,7 +177,7 @@ def prepare_bluez_global() -> None:
          "org.bluez.Adapter1", "StopDiscovery"],
         timeout=1.5,
     )
-    _force_le_scan_off(force=True)
+    _force_bt_inquiry_off(force=True)
 
 
 def prepare_bluez(mac: str = "", *, remove: bool = False) -> None:
@@ -314,7 +351,15 @@ class _ConnectHub:
                         worker = hub.workers_by_mac.get(mac)
                         if worker is not None and not worker.is_connected():
                             _bluez_remove_device(mac)
-                    await asyncio.sleep(0.08)
+                    # Reconnect settle (joyfusion finding): the kernel/BlueZ
+                    # hasn't finished tearing down the just-removed device's
+                    # old L2CAP/ATT association when the next connect starts
+                    # right after; joyfusion settled on 1.5s (500ms wasn't
+                    # enough once retries got faster -- EBUSY). Applied ONLY
+                    # to genuine reconnects (ever_connected); a first-ever
+                    # connect must dial immediately, the Joy-Con 2 advertises
+                    # for only ~10s when woken and a 1.5s delay makes it miss
+                    # that window entirely.
                 async with hub._connect_lock:
                     for mac in pending:
                         worker = hub.workers_by_mac.get(mac)
@@ -322,6 +367,8 @@ class _ConnectHub:
                             hub._logged.discard(mac)
                             hub._last_seen.pop(mac, None)
                             continue
+                        if worker.ever_connected:
+                            await asyncio.sleep(1.5)
                         mode = hub._last_seen[mac][1]
                         try:
                             ok, detail = await hub._loop.run_in_executor(
@@ -335,7 +382,33 @@ class _ConnectHub:
                             hub._logged.discard(mac)
                         else:
                             logger.info("connect to %s (%s) failed (%s)", mac, mode, detail)
-                            _force_le_scan_off(force=True)
+                            _force_bt_inquiry_off(force=True)
+                            if worker.ever_connected:
+                                worker.reconnect_failures += 1
+                                if (
+                                    worker.reconnect_failures
+                                    >= _RECONNECT_FAILURES_BEFORE_POWER_CYCLE
+                                    and not any(
+                                        w.is_connected()
+                                        for w in hub.workers_by_mac.values()
+                                    )
+                                ):
+                                    logger.warning(
+                                        "reconnects failing repeatedly with nothing left connected; "
+                                        "power-cycling adapter to clear wedged radio state"
+                                    )
+                                    _power_cycle_adapter()
+                                    for w in hub.workers_by_mac.values():
+                                        w.reconnect_failures = 0
+                                    hub._last_seen.clear()
+                                    hub._logged.clear()
+                                    # Adapter needs a moment to re-init;
+                                    # bail out of this pass -- the scan
+                                    # loop will re-see the pads on their
+                                    # next advertisement. Also avoids the
+                                    # KeyError the cleared _last_seen would
+                                    # cause on the next pending mac.
+                                    break
 
                 for mac, (seen_at, _) in list(hub._last_seen.items()):
                     if now - seen_at > seen_ttl_s:
@@ -356,11 +429,15 @@ class _ConnectHub:
         if not adapter:
             return False, "no adapter configured"
         with _CONNECT_LOCK:
-            _force_le_scan_off()
             last_detail = "no attempts"
             for attempt in range(_CONNECT_ATTEMPTS):
-                if attempt and attempt % 4 == 0:
-                    _force_le_scan_off()
+                # BR/EDR Inquiry restarts ~1s after being stopped (same-host
+                # btmon finding); each attempt window is up to ~0.9s, so
+                # re-stop it right before every attempt. Note: the cadence
+                # that wedged the adapter on hardware was a 0.3s background
+                # thread; once per ~0.9s attempt is 3x lighter than that
+                # while still staying inside the restart budget.
+                _force_bt_inquiry_off()
                 ctrl = SwitchController(mac, adapter)
                 for dst in (att.LE_PUBLIC, att.LE_RANDOM):
                     ok, detail = ctrl.att._connect_once(dst, _CONNECT_ATTEMPT_S)
@@ -403,6 +480,15 @@ class _Worker:
         self._disconnected = threading.Event()
         self._ready = threading.Event()
         self._led_player: Optional[int] = None
+        # Set once this mac has ever completed activate() successfully.
+        # Distinguishes a real reconnect (needs the settle delay below --
+        # see _scan_loop) from this process's first-ever connect to it,
+        # which has no stale BlueZ/kernel L2CAP state to wait out.
+        self.ever_connected = False
+        # Consecutive failed reconnect passes since the last success or
+        # power cycle; drives the adapter power-cycle recovery (see
+        # _scan_loop).
+        self.reconnect_failures = 0
 
     def is_connected(self) -> bool:
         return self.controller is not None and self.controller.is_connected
@@ -496,6 +582,8 @@ class _Worker:
                 self.on_topology_change()
             if self.hub.bridge is not None:
                 self.hub.bridge._publish_state()
+            self.ever_connected = True
+            self.reconnect_failures = 0
             return True
         except Exception as exc:  # noqa: BLE001
             logger.error("session setup failed for %s: %s", mac, exc)
