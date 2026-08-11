@@ -178,16 +178,18 @@ def fix_gamecube_mapping(mapping: str) -> str:
 # capability set itself (what Dolphin reads directly) is correct. Button
 # indices below are SDL's own enumeration order, which follows the evdev
 # capability declaration order in ngc/gamepad.py -- sorted by evdev code:
-# b0=BTN_TRIGGER (declared-but-dead, exists only so SDL's joystick
-# classifier recognizes this device at all -- see gamepad.py's
-# _NEEDS_SDL_JOYSTICK_HINT) b1=CAPTURE(BTN_Z) b2=L(BTN_TL) b3=SL(BTN_TR)
-# b4=ZL(BTN_TL2) b5=SR(BTN_TR2) b6=MINUS(BTN_SELECT)
-# b7=stick-click(BTN_THUMBL) b8-11=D-pad up/down/left/right (BTN_DPAD_*,
-# plain buttons -- not a hat; nothing here declares Hat0X/Y).
+# b0=BTN_A (declared-but-dead, exists only so SDL's joystick classifier
+# recognizes this device at all -- see gamepad.py's
+# _NEEDS_SDL_JOYSTICK_HINT; BTN_A rather than BTN_TRIGGER specifically so
+# it stays in the same evdev code block as everything else here, see that
+# doc comment) b1=CAPTURE(BTN_Z) b2=L(BTN_TL) b3=SL(BTN_TR) b4=ZL(BTN_TL2)
+# b5=SR(BTN_TR2) b6=MINUS(BTN_SELECT) b7=stick-click(BTN_THUMBL)
+# b8-11=D-pad up/down/left/right (BTN_DPAD_*, plain buttons -- not a hat;
+# nothing here declares Hat0X/Y).
 # CAPTURE goes to misc1, not guide -- guide has special significance to Steam
 # (opens the overlay / hijacks input), which is exactly what CAPTURE landing
-# on BTN_MODE caused before this device switched to BTN_Z. b0 (BTN_TRIGGER)
-# has no semantic slot here -- it's never actually pressed.
+# on BTN_MODE caused before this device switched to BTN_Z. b0 (BTN_A) has
+# no semantic slot here -- it's never actually pressed.
 NGC_JOYCON2_LEFT_BUTTONS = (
     "misc1:b1",
     "leftshoulder:b2",

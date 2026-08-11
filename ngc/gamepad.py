@@ -205,10 +205,18 @@ class SwitchGamepad:
     # is the likely reason: this classifier is a *process-local* ioctl bit
     # check SDL does itself, not dependent on being able to read udev's
     # database at all, so it's the more reliable fix regardless of what
-    # environment Steam is running in). BTN_TRIGGER is declared but never
-    # actually emitted (solo Joy-Con has no such button) purely to satisfy
-    # this check, chosen over BTN_A so a binding UI doesn't show it as a
-    # stuck-at-0 face button.
+    # environment Steam is running in). Originally used BTN_TRIGGER (over
+    # BTN_A) so a binding UI wouldn't show a stuck-at-0 face button --
+    # reverted: BTN_TRIGGER lives in the separate BTN_JOYSTICK code block
+    # (0x120-0x12f) instead of BTN_GAMEPAD (0x130+, where every other
+    # button here lives), and having one button from that other block
+    # apparently makes Dolphin's device list reclassify the whole pad as a
+    # "generic joystick" and fall back to numbered "Button 1/2/3" labels
+    # instead of symbolic ones (BTN_Z, BTN_TL, ...) for every button, not
+    # just the odd one out -- confirmed on real hardware. BTN_A stays
+    # inside the BTN_GAMEPAD block like everything else, so it doesn't
+    # trip that reclassification; the one dead "A" entry in a binding UI
+    # is the smaller cost.
     _NEEDS_SDL_JOYSTICK_HINT = {P.JOYCON2_LEFT_PID}
 
     def __init__(
@@ -221,7 +229,7 @@ class SwitchGamepad:
         self.button_map = button_map or DEFAULT_BUTTON_MAP
         keys = set(self.button_map.values())
         if product in self._NEEDS_SDL_JOYSTICK_HINT:
-            keys.add(e.BTN_TRIGGER)
+            keys.add(e.BTN_A)
         keys = sorted(keys)
 
         self._has_right_stick = product in self._HAS_RIGHT_STICK
