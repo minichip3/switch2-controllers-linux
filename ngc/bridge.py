@@ -461,55 +461,94 @@ class _ConnectHub:
 
         hub._scanner = BleakScanner(detection_callback=on_adv)
         logger.info("scanning for configured controllers (press a button or hold Sync)")
+
+        scanner_running = False
+
+        async def _start_scanning() -> None:
+            nonlocal scanner_running
+            if scanner_running:
+                return
+            # If another client (Steam Input, decky wake plugin) holds the
+            # adapter's LE discovery, start() fails immediately with
+            # [org.bluez.Error.InProgress]. Clear the HCI-level scan and
+            # retry here so a transient Steam scan doesn't kill the whole
+            # hub loop; the _run_async backoff is the outer net.
+            hub._scanning = True
+            for scan_attempt in range(1, 4):
+                try:
+                    await hub._scanner.start()
+                    scanner_running = True
+                    return
+                except BleakDBusError as exc:
+                    if "InProgress" not in str(exc):
+                        hub._scanning = False
+                        raise
+                    hub._scanning = False
+                    prepare_bluez_global()
+                    _force_bt_le_scan_off()
+                    logger.warning(
+                        "LE scan held by another client; cleared, retry %d/3",
+                        scan_attempt,
+                    )
+                    await asyncio.sleep(0.5 * scan_attempt)
+                    hub._scanning = True
+            hub._scanning = False
+            raise BleakDBusError(
+                "org.bluez.Error.InProgress",
+                "LE scan still held by another client after 3 clears",
+            )
+
+        async def _stop_scanning() -> None:
+            nonlocal scanner_running
+            if not scanner_running:
+                return
+            await hub._scanner.stop()
+            scanner_running = False
+            hub._scanning = False
+
         try:
             while not hub.stop.is_set():
                 workers = list(hub.workers_by_mac.values())
                 disconnected = [w for w in workers if not w.is_connected()]
                 if not disconnected:
-                    hub._scanning = False
+                    await _stop_scanning()
                     await asyncio.sleep(1.5)
                     continue
 
                 connected_count = len(workers) - len(disconnected)
                 if connected_count:
-                    # Scanning while a pad is linked can drop the live session; brief pause.
+                    # A live session is connected elsewhere -- keep scanning
+                    # to short, deliberate bursts instead of leaving
+                    # discovery running continuously (scanning while a pad
+                    # is linked can drop it). Already low-duty (1s pause
+                    # below), so this isn't the constant-toggle
+                    # self-interference the idle branch below used to be.
+                    await _stop_scanning()
                     await asyncio.sleep(1.0)
-
-                scan_on_s = 0.12 if connected_count else 0.25
-                # If another client (Steam Input, decky wake plugin) holds the
-                # adapter's LE discovery, start() fails immediately with
-                # [org.bluez.Error.InProgress]. Clear the HCI-level scan and
-                # retry here so a transient Steam scan doesn't kill the whole
-                # hub loop; the _run_async backoff is the outer net.
-                hub._scanning = True
-                for scan_attempt in range(1, 4):
-                    try:
-                        await hub._scanner.start()
-                        break
-                    except BleakDBusError as exc:
-                        if "InProgress" not in str(exc):
-                            raise
-                        hub._scanning = False
-                        prepare_bluez_global()
-                        _force_bt_le_scan_off()
-                        logger.warning(
-                            "LE scan held by another client; cleared, retry %d/3",
-                            scan_attempt,
-                        )
-                        await asyncio.sleep(0.5 * scan_attempt)
-                        hub._scanning = True
+                    await _start_scanning()
+                    await asyncio.sleep(0.12)
+                    await _stop_scanning()
                 else:
-                    raise BleakDBusError(
-                        "org.bluez.Error.InProgress",
-                        "LE scan still held by another client after 3 clears",
-                    )
-                try:
-                    await asyncio.sleep(scan_on_s)
-                finally:
-                    await hub._scanner.stop()
-                    hub._scanning = False
-
-                await asyncio.sleep(_SCAN_SETTLE_S)
+                    # Nothing connected anywhere -- the common "waiting for
+                    # a button press" state, often for long stretches.
+                    # Real-hardware finding (this investigation): repeatedly
+                    # stopping/restarting discovery every ~0.3-0.5s here (as
+                    # this loop used to, every iteration) was itself keeping
+                    # BR/EDR Inquiry and LE discovery cycling nonstop at the
+                    # HCI level -- confirmed via `busctl monitor org.bluez`,
+                    # which showed *this process's own* D-Bus connection as
+                    # the sender issuing the repeated
+                    # SetDiscoveryFilter/StartDiscovery/StopDiscovery calls.
+                    # Every raw connect attempt was colliding with our own
+                    # scanner's restarts, not some external client or a
+                    # bluetoothd quirk. Leave the scanner running
+                    # continuously instead; bleak's detection_callback still
+                    # fires in the background regardless of this loop's
+                    # sleep, so nothing is missed. Only stop it right before
+                    # a raw connect attempt below (raw L2CAP needs a quiet
+                    # radio), then resume after.
+                    await _start_scanning()
+                    await asyncio.sleep(0.25)
 
                 now = time.monotonic()
                 pending = sorted(
@@ -523,6 +562,8 @@ class _ConnectHub:
                     reverse=True,
                 )
                 if pending:
+                    await _stop_scanning()
+                    await asyncio.sleep(_SCAN_SETTLE_S)
                     # Clear Steam's LE scan and drop BlueZ Device ghosts before dialing.
                     prepare_bluez_global()
                     for mac in pending:
@@ -620,7 +661,7 @@ class _ConnectHub:
                 await asyncio.sleep(0.05 if connected_count else 0.025)
         finally:
             hub._scanning = False
-            if hub._scanner is not None:
+            if scanner_running and hub._scanner is not None:
                 await hub._scanner.stop()
 
     def _connect_sync(self, mac: str, mode: str = "pairing") -> tuple[bool, str]:
