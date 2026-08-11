@@ -170,41 +170,40 @@ def fix_gamecube_mapping(mapping: str) -> str:
     return ",".join([guid, name, *buttons, *axis_tokens])
 
 
-# Solo Left Joy-Con 2, using the kernel hid-nintendo button convention (see
-# ngc/gamepad.py's JOYCON2_LEFT_BUTTON_MAP doc comment). SDL has no built-in
-# template for this button layout, so without an explicit line here it falls
-# back to its generic auto-mapping heuristic -- which guesses wrong for this
-# device (SL/SR land on the d-pad's guessed slots) even though the raw evdev
-# capability set itself (what Dolphin reads directly) is correct. Button
-# indices below are SDL's own enumeration order, which follows the evdev
-# capability declaration order in ngc/gamepad.py -- sorted by evdev code:
-# b0=BTN_TRIGGER (declared-but-dead, exists only so SDL's joystick
-# classifier recognizes this device at all -- see gamepad.py's
-# _NEEDS_SDL_JOYSTICK_HINT) b1=CAPTURE(BTN_Z) b2=L(BTN_TL) b3=SL(BTN_TR)
-# b4=ZL(BTN_TL2) b5=SR(BTN_TR2) b6=MINUS(BTN_SELECT)
-# b7=stick-click(BTN_THUMBL) b8-11=D-pad up/down/left/right (BTN_DPAD_*,
-# plain buttons -- not a hat; nothing here declares Hat0X/Y).
-# CAPTURE goes to misc1, not guide -- guide has special significance to Steam
-# (opens the overlay / hijacks input), which is exactly what CAPTURE landing
-# on BTN_MODE caused before this device switched to BTN_Z. b0 (BTN_TRIGGER)
-# has no semantic slot here -- it's never actually pressed.
+# Solo Left Joy-Con 2. As of ngc/gamepad.py's JOYCON2_LEFT_BUTTON_MAP, this
+# device deliberately declares the same full 15-code BTN_GAMEPAD block (plus
+# right stick / trigger axes, all dead except where noted) as Pro Controller
+# 2 does -- Steam has its own built-in special-casing for vendor 0x057e
+# (Nintendo) that forces this exact capability *shape* and slot layout
+# regardless of gamecontrollerdb.txt, confirmed on real hardware via
+# controller.txt, so matching that shape is what actually gets this pad
+# recognized correctly by Steam (see that doc comment for the full story).
+# This line matches the same layout for everything else that reads SDL
+# mappings (Dolphin, this script's own --write path, etc.) instead of
+# falling back to auto-guessing. Evdev-sorted indices: b0=a b1=b b2=c(dead)
+# b3=x b4=y b5=z(dead) b6=L(leftshoulder) b7=SL(rightshoulder) b8=ZL-slot
+# (dead -- ZL is the lefttrigger axis instead) b9=SR-slot (dead --
+# righttrigger axis instead) b10=MINUS(back) b11=CAPTURE(start)
+# b12=guide(dead) b13=stick-click(leftstick) b14=rightstick(dead).
 NGC_JOYCON2_LEFT_BUTTONS = (
-    "misc1:b1",
-    "leftshoulder:b2",
-    "rightshoulder:b3",
-    "lefttrigger:b4",
-    "righttrigger:b5",
-    "back:b6",
-    "leftstick:b7",
-    "dpup:b8",
-    "dpdown:b9",
-    "dpleft:b10",
-    "dpright:b11",
+    "leftshoulder:b6",
+    "rightshoulder:b7",
+    "back:b10",
+    "start:b11",
+    "leftstick:b13",
+    "dpup:h0.1",
+    "dpright:h0.2",
+    "dpdown:h0.4",
+    "dpleft:h0.8",
 )
 
 NGC_JOYCON2_LEFT_AXES = (
     "leftx:a0",
     "lefty:a1",
+    "lefttrigger:a2",
+    "rightx:a3",
+    "righty:a4",
+    "righttrigger:a5",
     "platform:Linux",
 )
 
