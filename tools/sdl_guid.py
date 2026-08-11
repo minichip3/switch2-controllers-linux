@@ -313,12 +313,21 @@ def main() -> int:
                 m = sdl2.SDL_GameControllerMapping(gc)
                 mapping = m.decode() if m else None
                 sdl2.SDL_GameControllerClose(gc)
+        is_ngc_pad = any(h in name.lower() for h in NGC_NAME_HINTS)
+        if mapping is None and is_ngc_pad:
+            # SDL_IsGameController() is false until *some* mapping exists
+            # for this GUID -- there's no built-in template for this button
+            # layout, so it never gets one on its own. Our fix_* functions
+            # (fix_joycon2_left_mapping etc.) build the full button/axis
+            # token list themselves from scratch and only need guid+name
+            # from the base line, so a bare synthesized one works fine here.
+            mapping = f"{guid_str},{name},"
         print(f"[{i}] {name}")
         print(f"     GUID: {guid_str}  gamecontroller={is_gc}")
         if mapping:
             mapping = mapping_for_pad(name, mapping)
             print(f"     mapping: {mapping}")
-            if any(h in name.lower() for h in NGC_NAME_HINTS):
+            if is_ngc_pad:
                 mappings.append((name, mapping))
         print()
 
