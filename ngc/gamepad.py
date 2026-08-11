@@ -131,22 +131,39 @@ def uinput_product_id(product: int) -> int:
     return product
 
 
-# SDL's GUID for a Linux joystick is derived from bus type + vendor +
-# product + *version* (bcdDevice). Steam separately caches a controller's
-# resolved mapping per GUID once it's seen one ("HID: Add to Config Cache -
-# full cache hit" in ~/.local/share/Steam/logs/controller.txt) and doesn't
-# re-derive it from gamecontrollerdb.txt just because the file changed --
-# confirmed on real hardware: editing/upserting the mapping line for solo
-# Left Joy-Con's GUID had zero effect on what Steam actually used, even
-# across full Steam restarts, because Steam already had a bad first
-# impression of that exact GUID cached from before the mapping existed.
-# Bumping the version for this one product changes its GUID, so Steam has
-# never seen it before and has nothing stale to fall back on.
+# Tried bumping the uinput version (bcdDevice) for this product to force a
+# new SDL GUID, on the theory Steam was reusing a cached mapping keyed by
+# the old one. Ruled out on real hardware: controller.txt showed Steam
+# apply the exact same (wrong) auto-guessed mapping even for the brand new,
+# never-before-seen GUID -- not a caching issue after all (see
+# _UINPUT_VENDOR_OVERRIDES below for what actually was). Left in place
+# since it's harmless and does still get a fresh GUID for this pad.
 _UINPUT_VERSION_OVERRIDES = {P.JOYCON2_LEFT_PID: 0x0101}
 
 
 def uinput_version(product: int) -> int:
     return _UINPUT_VERSION_OVERRIDES.get(product, 0x0100)
+
+
+# The mapping Steam actually applied (per controller.txt) didn't match
+# JOYCON2_LEFT_BUTTON_MAP's real capabilities *at all* -- 4 face buttons, a
+# right stick, analog triggers, a d-pad hat -- none of which this device
+# declares. That mismatch was identical across two different SDL GUIDs
+# (ruling out a GUID-keyed cache) and identical to the generic "Nintendo
+# Switch Pro Controller"-shaped template, which points at Steam having its
+# own built-in vendor-level special-casing for vendor 0x057e (Nintendo)
+# that overrides gamecontrollerdb.txt/evdev capabilities entirely, separate
+# from -- and evaluated before -- the normal SDL_GameControllerDB path.
+# Advertising a neutral, non-Nintendo vendor ID for this pad avoids
+# triggering that path at all. 0x1209 is the pid.codes shared open-source/
+# hobbyist USB vendor ID (https://pid.codes) -- an accurate, honest choice
+# for a homebrew virtual device, not a random made-up number.
+_PIDCODES_VENDOR_ID = 0x1209
+_UINPUT_VENDOR_OVERRIDES = {P.JOYCON2_LEFT_PID: _PIDCODES_VENDOR_ID}
+
+
+def uinput_vendor_id(product: int) -> int:
+    return _UINPUT_VENDOR_OVERRIDES.get(product, P.NINTENDO_VENDOR_ID)
 
 
 DEFAULT_BUTTON_MAP = PRO_BUTTON_MAP
@@ -247,7 +264,7 @@ class SwitchGamepad:
         self.ui = UInput(
             capabilities,
             name=name,
-            vendor=P.NINTENDO_VENDOR_ID,
+            vendor=uinput_vendor_id(product),
             product=uinput_product_id(product),
             version=uinput_version(product),
             bustype=e.BUS_BLUETOOTH,
