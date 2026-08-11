@@ -131,6 +131,24 @@ def uinput_product_id(product: int) -> int:
     return product
 
 
+# SDL's GUID for a Linux joystick is derived from bus type + vendor +
+# product + *version* (bcdDevice). Steam separately caches a controller's
+# resolved mapping per GUID once it's seen one ("HID: Add to Config Cache -
+# full cache hit" in ~/.local/share/Steam/logs/controller.txt) and doesn't
+# re-derive it from gamecontrollerdb.txt just because the file changed --
+# confirmed on real hardware: editing/upserting the mapping line for solo
+# Left Joy-Con's GUID had zero effect on what Steam actually used, even
+# across full Steam restarts, because Steam already had a bad first
+# impression of that exact GUID cached from before the mapping existed.
+# Bumping the version for this one product changes its GUID, so Steam has
+# never seen it before and has nothing stale to fall back on.
+_UINPUT_VERSION_OVERRIDES = {P.JOYCON2_LEFT_PID: 0x0101}
+
+
+def uinput_version(product: int) -> int:
+    return _UINPUT_VERSION_OVERRIDES.get(product, 0x0100)
+
+
 DEFAULT_BUTTON_MAP = PRO_BUTTON_MAP
 
 
@@ -231,7 +249,7 @@ class SwitchGamepad:
             name=name,
             vendor=P.NINTENDO_VENDOR_ID,
             product=uinput_product_id(product),
-            version=0x0100,
+            version=uinput_version(product),
             bustype=e.BUS_BLUETOOTH,
             phys=phys,
         )
