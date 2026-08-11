@@ -54,6 +54,12 @@ _SCAN_SETTLE_S = 0.10
 # pending stalls on the same HCI command queue as that pending connect).
 # Suppressed once before the connect starts and then left alone.
 _CONNECT_ATTEMPT_S = 3.0
+# Shorter budget for "wake" mode (see _connect_sync) -- real-hardware
+# testing showed "wake" reconnects failing consistently at 3.0s/dst_type
+# across many passes even after ruling out other causes, suggesting its
+# advertising window is tighter than "pairing" mode's; give up sooner per
+# dst_type so both tries have a better chance of landing inside it.
+_CONNECT_ATTEMPT_S_WAKE = 1.2
 # Each dst_type tried costs ~1.5s (HCI-queue tax) + up to _CONNECT_ATTEMPT_S
 # regardless of outcome (see _connect_dst_with_polling), and both types are
 # always tried (see _connect_sync -- skipping the non-hinted type turned
@@ -396,7 +402,7 @@ class _ConnectHub:
                         mode = hub._last_seen[mac][1]
                         try:
                             ok, detail = await hub._loop.run_in_executor(
-                                hub._executor, hub._connect_sync, mac
+                                hub._executor, hub._connect_sync, mac, mode
                             )
                         except Exception as exc:  # noqa: BLE001
                             ok, detail = False, str(exc)
@@ -445,13 +451,23 @@ class _ConnectHub:
             if hub._scanner is not None:
                 await hub._scanner.stop()
 
-    def _connect_sync(self, mac: str) -> tuple[bool, str]:
+    def _connect_sync(self, mac: str, mode: str = "wake") -> tuple[bool, str]:
         worker = self.workers_by_mac.get(mac)
         if worker is None or worker.is_connected():
             return False, "already connected"
         adapter = self.config.adapter_mac
         if not adapter:
             return False, "no adapter configured"
+        # "wake" advertisements (reconnect to a specific bonded host) appear
+        # to stop a good deal sooner than "pairing" ones do -- real-hardware
+        # testing showed "pairing" reconnects succeeding reliably with the
+        # full _CONNECT_ATTEMPT_S budget per dst_type, while "wake" ones
+        # kept failing the same way across many passes even after ruling out
+        # timing/HCI-queue and dst_type-hint bugs as the cause. A shorter
+        # per-dst_type budget for wake gives up faster per attempt, better
+        # odds of both dst_type tries landing inside whatever that window
+        # actually is instead of the second one always finding the pad gone.
+        attempt_s = _CONNECT_ATTEMPT_S_WAKE if mode == "wake" else _CONNECT_ATTEMPT_S
         # Every dst_type tried costs a real ~1.5s HCI-queue tax on top of the
         # poll wait itself (see _connect_dst_with_polling), regardless of
         # whether it succeeds, so trying the previously-successful dst_type
@@ -473,7 +489,7 @@ class _ConnectHub:
             for attempt in range(_CONNECT_ATTEMPTS):
                 ctrl = SwitchController(mac, adapter)
                 for dst in dst_types:
-                    ok, detail = self._connect_dst_with_polling(ctrl, dst)
+                    ok, detail = self._connect_dst_with_polling(ctrl, dst, attempt_s)
                     if ok:
                         ctrl.att.dst_type = dst
                         if worker.activate(ctrl):
@@ -489,9 +505,9 @@ class _ConnectHub:
             return False, last_detail
 
     @staticmethod
-    def _connect_dst_with_polling(ctrl: SwitchController, dst: int) -> tuple[bool, str]:
-        """Start one connect and poll it to completion or _CONNECT_ATTEMPT_S,
-        without touching btmgmt again once the connect is in flight.
+    def _connect_dst_with_polling(ctrl: SwitchController, dst: int, attempt_s: float) -> tuple[bool, str]:
+        """Start one connect and poll it to completion or attempt_s, without
+        touching btmgmt again once the connect is in flight.
 
         Tried re-suppressing BR/EDR Inquiry on every short sub-poll here
         (every _POLL_SUBINTERVAL_S) on the theory that Inquiry creeping back
@@ -512,7 +528,7 @@ class _ConnectHub:
         s, err = ctrl.att._start_connect(dst)
         if s is None:
             return False, err
-        status, detail = ctrl.att._poll_connect(s, _CONNECT_ATTEMPT_S)
+        status, detail = ctrl.att._poll_connect(s, attempt_s)
         if status == "connected":
             ctrl.att._finish_connect(s)
             return True, "ok"
