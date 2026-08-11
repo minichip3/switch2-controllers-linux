@@ -410,6 +410,16 @@ class SwitchController:
         """Return (left_xy, right_xy floats, lt, rt 0-255) from a report."""
         lx, ly = self.left_calib.apply(report.left_stick_raw) if self.left_calib else (0.0, 0.0)
         rx, ry = self.right_calib.apply(report.right_stick_raw) if self.right_calib else (0.0, 0.0)
+        if self.product_id == P.JOYCON2_RIGHT_PID:
+            # A lone Right Joy-Con has exactly one physical stick, reported
+            # through the "stick 2" (right) report field/calibration --
+            # confirmed on real hardware (see this project's history: an
+            # earlier guess assumed it came through stick 1 like the Left
+            # Joy-Con and produced a dead stick). SwitchGamepad presents it
+            # as the primary (left) stick regardless of side, so swap it
+            # into that slot here rather than pushing side-awareness up
+            # into every caller.
+            (lx, ly), (rx, ry) = (rx, ry), (0.0, 0.0)
         if self.has_analog_triggers:
             lt = P.normalize_trigger(report.left_trigger_raw, self.trigger_neutral[0])
             rt = P.normalize_trigger(report.right_trigger_raw, self.trigger_neutral[1])

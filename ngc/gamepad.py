@@ -113,6 +113,37 @@ JOYCON2_LEFT_BUTTON_MAP = {
     "RIGHT": e.BTN_DPAD_RIGHT,
 }
 
+# Solo Joy-Con 2 (Right). Same kernel hid-nintendo convention as
+# JOYCON2_LEFT_BUTTON_MAP, confirmed against real hardware's Dolphin evdev
+# capability listing (in exactly this sorted order: SOUTH, EAST, NORTH,
+# WEST, TL, TR, TL2, TR2, START, MODE, THUMBR, then two plain stick axes).
+# Unlike the Left half, the Right half's primary 4 buttons are real face
+# buttons (A/B/X/Y), not a D-pad, so BTN_SOUTH ends up declared and driven
+# on its own -- no dead filler capability needed to satisfy SDL's joystick
+# classifier here, unlike JOYCON2_LEFT_BUTTON_MAP's BTN_A.
+#
+# SL/SR reuse the *opposite* (left) side's shoulder/trigger slots, same
+# opposite-side-reuse idea as the Left half's SL/SR -- this side's own
+# R/ZR take the same-side slots. Stick click is THUMBR here (not THUMBL --
+# unlike the Left half, whose click lands on THUMBL because its single
+# stick is presented as the primary/left stick regardless of side; see
+# SwitchGamepad and device.calibrated_input's Right-Joy-Con stick-source
+# swap. The *button* semantics stay side-correct even though the axis data
+# doesn't).
+JOYCON2_RIGHT_BUTTON_MAP = {
+    "A": e.BTN_SOUTH,
+    "B": e.BTN_EAST,
+    "X": e.BTN_WEST,
+    "Y": e.BTN_NORTH,
+    "SL_R": e.BTN_TL,
+    "R": e.BTN_TR,
+    "SR_R": e.BTN_TL2,
+    "ZR": e.BTN_TR2,
+    "PLUS": e.BTN_START,
+    "HOME": e.BTN_MODE,
+    "R_STK": e.BTN_THUMBR,
+}
+
 # Tried advertising the real Nintendo Switch (1) Joy-Con (L) USB product ID
 # (0x2006) here instead of the actual Switch 2 PID, on the theory that SDL's
 # built-in Joy-Con recognition would kick in for free. Backfired on real
@@ -176,6 +207,8 @@ def button_map_for_product(product_id: int) -> dict:
         return GAMECUBE_BUTTON_MAP
     if product_id == P.JOYCON2_LEFT_PID:
         return JOYCON2_LEFT_BUTTON_MAP
+    if product_id == P.JOYCON2_RIGHT_PID:
+        return JOYCON2_RIGHT_BUTTON_MAP
     return PRO_BUTTON_MAP
 
 
@@ -183,14 +216,21 @@ class SwitchGamepad:
     # Only the products in this set have a physical right stick / analog
     # trigger pair -- everything else (a solo Joy-Con half) declaring those
     # axes anyway just shows up as a permanently-centered phantom stick and
-    # dead trigger axes in Dolphin/Steam's device inspector.
-    _HAS_RIGHT_STICK = {P.PRO_CONTROLLER2_PID, P.NSO_GAMECUBE_PID, P.JOYCON2_RIGHT_PID}
+    # dead trigger axes in Dolphin/Steam's device inspector. Solo Right
+    # Joy-Con's one stick is presented as the *primary* (left/ABS_X/Y)
+    # stick regardless of side (see device.calibrated_input's stick-source
+    # swap for it), so it has no second stick to declare here either.
+    _HAS_RIGHT_STICK = {P.PRO_CONTROLLER2_PID, P.NSO_GAMECUBE_PID}
     _HAS_TRIGGER_AXES = {P.NSO_GAMECUBE_PID}  # only the GC pad has true analog L/R
     # Solo Left Joy-Con sends its D-pad as four discrete buttons (see
     # JOYCON2_LEFT_BUTTON_MAP), not a Hat0X/Y axis -- so it needs neither
     # the hat capability nor the hardcoded hat emission in update()/
-    # release_all() below.
-    _DPAD_AS_BUTTONS = {P.JOYCON2_LEFT_PID}
+    # release_all() below. Solo Right Joy-Con has no D-pad concept at all
+    # (its primary 4 buttons are real A/B/X/Y face buttons instead) so it
+    # doesn't need the hat either -- lands in this set for the same "skip
+    # declaring/emitting Hat0X/Y" effect even though it has no D-pad-as-
+    # buttons mapping of its own.
+    _DPAD_AS_BUTTONS = {P.JOYCON2_LEFT_PID, P.JOYCON2_RIGHT_PID}
     # SDL's evdev joystick classifier (SDL_EVDEV_GuessDeviceClass, checked
     # against actual SDL source) only sets ID_INPUT_JOYSTICK if, besides
     # ABS_X/Y, the device has BTN_TRIGGER, BTN_A, BTN_1, or one of a handful
