@@ -83,6 +83,34 @@ def _run_quiet(cmd: list[str], *, timeout: float = 2.0) -> None:
         pass
 
 
+def _disable_steam_bt_discovery() -> None:
+    """Re-enforce Steam's Bluetooth.Enabled=0 in config.vdf.
+
+    Steam owns a permanent HCI discovery session that re-triggers the BR/EDR
+    Inquiry ~1s after we stop it (see _force_bt_inquiry_off) and contends with
+    raw L2CAP connects *and* live sessions. The installer runs
+    scripts/disable-steam-bluetooth.py once, but Steam rewrites config.vdf on
+    exit / settings change / update, silently re-enabling discovery -- so
+    re-apply the patch at every daemon start. Best-effort, never raises; the
+    script keeps a timestamped backup and is a no-op when already disabled.
+    """
+    script = Path(__file__).resolve().parent.parent / "scripts" / "disable-steam-bluetooth.py"
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(script)],
+            capture_output=True,
+            text=True,
+            timeout=3.0,
+        )
+        out = (proc.stdout or "").strip()
+        if "disabled Steam Bluetooth" in out:
+            logger.info("Steam Bluetooth discovery disabled (config.vdf patched)")
+        elif out and "no change" not in out:
+            logger.debug("steam bt check: %s", out[:160])
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("steam bt disable failed: %s", exc)
+
+
 def _force_bt_inquiry_off(*, force: bool = False) -> None:
     """HCI-level BR/EDR Inquiry stop.
 
@@ -177,6 +205,7 @@ def prepare_bluez_global() -> None:
          "org.bluez.Adapter1", "StopDiscovery"],
         timeout=1.5,
     )
+    _disable_steam_bt_discovery()
     _force_bt_inquiry_off(force=True)
 
 
