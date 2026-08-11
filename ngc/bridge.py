@@ -83,6 +83,16 @@ _CONNECT_ATTEMPT_S = 3.0
 # that next advertisement instead of burning through a second one here
 # that likely wouldn't fit in the same window anyway.
 _CONNECT_ATTEMPTS = 1
+# Per-connect poll budget for a "wake" advertisement specifically.
+# Wake ads only last ~10s after a button press (the pad asks the host to
+# reconnect *now*), so the two address-type attempts must both fit inside
+# that window: 2.0s poll + ~1.5s HCI-queue tax per type, plus the pre-
+# connect settle, stays under it. Real-hardware log: a wake connect that
+# started 12s after the advertisement was seen always timed out; pairing
+# mode (Sync held) survives the same slow path only because its
+# advertising window outlasts it. Pairing/first-ever connects keep the
+# more generous 3.0s budget.
+_WAKE_CONNECT_ATTEMPT_S = 2.0
 
 
 def _adapter_index() -> str:
@@ -484,12 +494,20 @@ class _ConnectHub:
                             hub._logged.discard(mac)
                             hub._last_seen.pop(mac, None)
                             continue
-                        if worker.ever_connected:
+                        if worker.ever_connected and hub._last_seen[mac][1] != "wake":
+                            # Reconnect settle (kernel/BlueZ L2CAP teardown)
+                            # only applies to a *stale* association. A wake
+                            # advertisement means the pad is asking this
+                            # host to reconnect right now, and it only
+                            # advertises for ~10s — _teardown_radio already
+                            # scrubbed the old association when the session
+                            # died, so dial immediately instead of burning
+                            # the window on a 1.5s sleep.
                             await asyncio.sleep(1.5)
                         mode = hub._last_seen[mac][1]
                         try:
                             ok, detail = await hub._loop.run_in_executor(
-                                hub._executor, hub._connect_sync, mac
+                                hub._executor, hub._connect_sync, mac, mode
                             )
                         except Exception as exc:  # noqa: BLE001
                             ok, detail = False, str(exc)
@@ -524,14 +542,14 @@ class _ConnectHub:
             if hub._scanner is not None:
                 await hub._scanner.stop()
 
-    def _connect_sync(self, mac: str) -> tuple[bool, str]:
+    def _connect_sync(self, mac: str, mode: str = "pairing") -> tuple[bool, str]:
         worker = self.workers_by_mac.get(mac)
         if worker is None or worker.is_connected():
             return False, "already connected"
         adapter = self.config.adapter_mac
         if not adapter:
             return False, "no adapter configured"
-        attempt_s = _CONNECT_ATTEMPT_S
+        attempt_s = _WAKE_CONNECT_ATTEMPT_S if mode == "wake" else _CONNECT_ATTEMPT_S
         # Every dst_type tried costs a real ~1.5s HCI-queue tax on top of the
         # poll wait itself (see _connect_dst_with_polling), regardless of
         # whether it succeeds, so trying the previously-successful dst_type
