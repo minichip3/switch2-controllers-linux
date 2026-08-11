@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -19,19 +20,48 @@ CONFIG_PATH = CONFIG_DIR / "config.json"
 CONFIG_BACKUP = CONFIG_DIR / "config.json.bak"
 
 
-def detect_adapter() -> Optional[str]:
-    """Return the first Bluetooth adapter's address from sysfs (no root needed)."""
-    base = Path("/sys/class/bluetooth")
-    if not base.exists():
-        return None
-    for hci in sorted(base.iterdir()):
-        addr = hci / "address"
-        if addr.exists():
-            try:
-                return addr.read_text().strip().upper()
-            except OSError:
-                continue
+def _detect_adapter_dbus() -> Optional[str]:
+    """Ask BlueZ over D-Bus for an adapter's address.
+
+    Fallback for when sysfs hasn't populated hciN/address yet -- real-world
+    finding: a fresh Ubuntu live-USB boot had BlueZ fully Powered with a
+    working adapter (GUI pairing of another device succeeded) while
+    /sys/class/bluetooth/hci0/address never appeared, so the sysfs-only
+    check below returned None even though a usable adapter existed.
+    """
+    for idx in range(4):
+        try:
+            out = subprocess.run(
+                ["busctl", "--system", "get-property", "org.bluez", f"/org/bluez/hci{idx}",
+                 "org.bluez.Adapter1", "Address"],
+                capture_output=True, text=True, timeout=2.0,
+            )
+        except Exception:  # noqa: BLE001
+            continue
+        if out.returncode != 0:
+            continue
+        parts = out.stdout.strip().split(None, 1)
+        if len(parts) == 2:
+            return parts[1].strip('"').upper()
     return None
+
+
+def detect_adapter() -> Optional[str]:
+    """Return the first Bluetooth adapter's address.
+
+    Prefers sysfs (no root, no subprocess), falling back to D-Bus if that
+    finds nothing -- see _detect_adapter_dbus.
+    """
+    base = Path("/sys/class/bluetooth")
+    if base.exists():
+        for hci in sorted(base.iterdir()):
+            addr = hci / "address"
+            if addr.exists():
+                try:
+                    return addr.read_text().strip().upper()
+                except OSError:
+                    continue
+    return _detect_adapter_dbus()
 
 
 @dataclass
