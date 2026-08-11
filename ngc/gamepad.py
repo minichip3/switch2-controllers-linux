@@ -122,6 +122,12 @@ JOYCON2_LEFT_BUTTON_MAP = {
 # on its own -- no dead filler capability needed to satisfy SDL's joystick
 # classifier here, unlike JOYCON2_LEFT_BUTTON_MAP's BTN_A.
 #
+# Face buttons use the kernel driver's Nintendo diamond (A=east, B=south,
+# X=north, Y=west) -- the same convention the real Joy-Con 1 presents on
+# hardware (confirmed: its physical Y reads as evdev WEST; our earlier
+# Xbox-style A=south/B=east/X=west/Y=north came out rotated 90 degrees
+# against it).
+#
 # SL/SR reuse the *opposite* (left) side's shoulder/trigger slots, same
 # opposite-side-reuse idea as the Left half's SL/SR -- this side's own
 # R/ZR take the same-side slots. Stick click is THUMBR here (not THUMBL --
@@ -131,10 +137,10 @@ JOYCON2_LEFT_BUTTON_MAP = {
 # swap. The *button* semantics stay side-correct even though the axis data
 # doesn't).
 JOYCON2_RIGHT_BUTTON_MAP = {
-    "A": e.BTN_SOUTH,
-    "B": e.BTN_EAST,
-    "X": e.BTN_WEST,
-    "Y": e.BTN_NORTH,
+    "A": e.BTN_EAST,
+    "B": e.BTN_SOUTH,
+    "X": e.BTN_NORTH,
+    "Y": e.BTN_WEST,
     "SL_R": e.BTN_TL,
     "R": e.BTN_TR,
     "SR_R": e.BTN_TL2,
@@ -275,13 +281,16 @@ class SwitchGamepad:
         self._has_right_stick = product in self._HAS_RIGHT_STICK
         self._has_trigger_axes = product in self._HAS_TRIGGER_AXES
         self._dpad_as_buttons = product in self._DPAD_AS_BUTTONS
-        # The Left Joy-Con's stick reports its raw axes rotated 90 degrees
-        # clockwise from what a standalone stick should read (pushing left
-        # registered as up) -- confirmed on real hardware. Rotating the
-        # input 90 degrees counter-clockwise before scaling, (x, y) -> (-y, x),
-        # cancels it out. Not needed solo-Right or paired, where the stick
-        # reads correctly already.
+        # A solo Joy-Con's stick reports its raw axes rotated 90 degrees
+        # from what a standalone stick should read (Left: pushing left
+        # registered as up -- confirmed on real hardware). Rotating the
+        # input 90 degrees the other way before scaling cancels it out:
+        # Left  (x, y) -> (-y, x),  Right (x, y) -> (y, -x).
+        # Right is the mirror image of Left (its portrait-up points the
+        # opposite way in landscape grip), hence the mirrored rotation.
+        # Not needed paired, where the sticks read correctly already.
         self._rotate_left_stick_ccw90 = product == P.JOYCON2_LEFT_PID
+        self._rotate_right_stick_cw90 = product == P.JOYCON2_RIGHT_PID
 
         abs_axes = [
             (e.ABS_X, AbsInfo(0, STICK_MIN, STICK_MAX, 0, 0, 0)),
@@ -384,6 +393,8 @@ class SwitchGamepad:
         lx, ly = left_stick
         if self._rotate_left_stick_ccw90:
             lx, ly = -ly, lx
+        if self._rotate_right_stick_cw90:
+            lx, ly = ly, -lx
         changed |= self._emit_abs(e.ABS_X, self._scale_stick(lx))
         changed |= self._emit_abs(e.ABS_Y, -self._scale_stick(ly))
         if self._has_right_stick:
