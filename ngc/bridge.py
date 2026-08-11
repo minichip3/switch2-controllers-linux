@@ -728,16 +728,18 @@ class _ConnectHub:
         alone for the whole wait avoids that self-inflicted stall -- even
         though Inquiry may creep back in before this wait ends.
 
-        Clears both discovery types before starting: BR/EDR Inquiry
-        (_force_bt_inquiry_off, the confirmed interference source) and LE
-        scan (_force_bt_le_scan_off) in case something is also holding LE
-        discovery at this exact moment -- untested until now, cheap to
-        clear, and each call is a no-op if that type isn't actually active.
-        Both run here (before the connect starts), never during the poll --
-        see above for why mid-poll btmgmt calls are actively harmful.
+        Tried also clearing LE scan here (_force_bt_le_scan_off) alongside
+        BR/EDR Inquiry, on the theory something might be holding LE
+        discovery at the exact moment a connect starts -- reverted:
+        real-hardware timing showed each btmgmt invocation costs a real
+        ~1.5s regardless of pending state (not just the mid-poll HCI-queue
+        contention documented above), so adding a second call here before
+        every dst_type attempt added ~1.5s x 2 dst_types to every connect
+        pass for no measurable benefit -- _scan_loop now stops our own
+        scanner before this point anyway (see _scan_loop), which was the
+        only LE-scan source ever actually confirmed active here.
         """
         _force_bt_inquiry_off()
-        _force_bt_le_scan_off()
         s, err = ctrl.att._start_connect(dst)
         if s is None:
             return False, err
