@@ -166,11 +166,58 @@ def fix_gamecube_mapping(mapping: str) -> str:
     return ",".join([guid, name, *buttons, *axis_tokens])
 
 
+# Solo Left Joy-Con 2, using the kernel hid-nintendo button convention (see
+# ngc/gamepad.py's JOYCON2_LEFT_BUTTON_MAP doc comment). SDL has no built-in
+# template for this button layout, so without an explicit line here it falls
+# back to its generic auto-mapping heuristic -- which guesses wrong for this
+# device (SL/SR land on the d-pad's guessed slots) even though the raw evdev
+# capability set itself (what Dolphin reads directly) is correct. Button
+# indices below are SDL's own enumeration order, which follows the evdev
+# capability declaration order in ngc/gamepad.py -- sorted by evdev code:
+# b0=CAPTURE(BTN_Z) b1=L(BTN_TL) b2=SL(BTN_TR) b3=ZL(BTN_TL2) b4=SR(BTN_TR2)
+# b5=MINUS(BTN_SELECT) b6=stick-click(BTN_THUMBL) b7-10=D-pad up/down/left/right
+# (BTN_DPAD_*, plain buttons -- not a hat; nothing here declares Hat0X/Y).
+# CAPTURE goes to misc1, not guide -- guide has special significance to Steam
+# (opens the overlay / hijacks input), which is exactly what CAPTURE landing
+# on BTN_MODE caused before this device switched to BTN_Z.
+NGC_JOYCON2_LEFT_BUTTONS = (
+    "misc1:b0",
+    "leftshoulder:b1",
+    "rightshoulder:b2",
+    "lefttrigger:b3",
+    "righttrigger:b4",
+    "back:b5",
+    "leftstick:b6",
+    "dpup:b7",
+    "dpdown:b8",
+    "dpleft:b9",
+    "dpright:b10",
+)
+
+NGC_JOYCON2_LEFT_AXES = (
+    "leftx:a0",
+    "lefty:a1",
+    "platform:Linux",
+)
+
+
+def fix_joycon2_left_mapping(mapping: str) -> str:
+    """Build a complete gamecontrollerdb line for the solo Left Joy-Con 2 pad."""
+    parts = mapping.split(",")
+    if len(parts) < 2:
+        return mapping
+    guid, name = parts[0], parts[1]
+    return ",".join([guid, name, *NGC_JOYCON2_LEFT_BUTTONS, *NGC_JOYCON2_LEFT_AXES])
+
+
 def mapping_for_pad(name: str, mapping: str | None) -> str | None:
     if not mapping:
         return None
-    if "gamecube" in name.lower():
+    lname = name.lower()
+    if "gamecube" in lname:
         return fix_gamecube_mapping(mapping)
+    if "joy-con 2 (left)" in lname:
+        return fix_joycon2_left_mapping(mapping)
     return mapping
 
 
