@@ -277,6 +277,16 @@ def merge_state_with_pads(state: dict | None, pads: list[PadStatus]) -> list[Pad
     return merged
 
 
+def _infer_role(name: str) -> str | None:
+    """Guess which Joy-Con 2 half a saved controller is, from its name."""
+    n = (name or "").lower()
+    if "left" in n or "(l)" in n:
+        return "left"
+    if "right" in n or "(r)" in n:
+        return "right"
+    return None
+
+
 def group_pads(pads: list[PadStatus]) -> list[list[PadStatus]]:
     """Group the two halves of a combined pair (same player, complementary
     roles) into one row; everything else stays a single row."""
@@ -501,6 +511,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._menu_items = [
             ("Add Controller…", self.on_add),
             ("Combine Two Joy-Cons…", self.on_combine),
+            ("Uncombine Joy-Cons…", self.on_uncombine),
             ("Remove Controller…", self.on_remove),
             ("Remove & Set Up Again…", self.on_remove_and_repair),
             ("Swap Player 1 ↔ 2", self.on_swap_p1_p2),
@@ -825,7 +836,7 @@ class MainWindow(Gtk.ApplicationWindow):
         d.destroy()
         return ok
 
-    def _pick_from(self, title: str, message: str, pads: list[PadStatus]) -> PadStatus | None:
+    def _pick_from(self, title: str, message: str, pads: list[PadStatus], label_fn=None) -> PadStatus | None:
         if not pads:
             self._info(title, "No controllers saved yet.")
             return None
@@ -848,9 +859,12 @@ class MainWindow(Gtk.ApplicationWindow):
         box.pack_start(lbl, False, False, 0)
         combo = Gtk.ComboBoxText.new()
         for pad in pads:
-            label = f"Player {pad.player} — {pad.name}"
-            if pad.pair_role:
-                label += f" ({pad.pair_role.title()} half)"
+            if label_fn:
+                label = label_fn(pad)
+            else:
+                label = f"Player {pad.player} — {pad.name}"
+                if pad.pair_role:
+                    label += f" ({pad.pair_role.title()} half)"
             combo.append(pad.mac, label)
         combo.set_active(0)
         box.pack_start(combo, False, False, 0)
@@ -1047,28 +1061,31 @@ class MainWindow(Gtk.ApplicationWindow):
         box.set_margin_top(16)
         box.set_margin_bottom(8)
         box.set_spacing(10)
-        lbl = Gtk.Label(label="Pick which half is Left and which is Right — they'll "
-                              "combine into one pad on the lower player slot.")
+        lbl = Gtk.Label(label="Pick the two halves — the left/right side is figured "
+                              "out automatically from each name. They'll combine "
+                              "into one pad on the lower player slot.")
         lbl.set_line_wrap(True)
         lbl.set_xalign(0)
         lbl.get_style_context().add_class("detail")
         box.pack_start(lbl, False, False, 0)
 
         def name_of(p: PadStatus) -> str:
-            return f"{p.name} (P{p.player})"
+            side = _infer_role(p.name)
+            badge = f" ({side})" if side else " (side unknown)"
+            return f"{p.name} (P{p.player}){badge}"
 
-        left_combo = Gtk.ComboBoxText.new()
+        first_combo = Gtk.ComboBoxText.new()
         for p in candidates:
-            left_combo.append(p.mac, name_of(p))
-        left_combo.set_active(0)
-        right_combo = Gtk.ComboBoxText.new()
+            first_combo.append(p.mac, name_of(p))
+        first_combo.set_active(0)
+        second_combo = Gtk.ComboBoxText.new()
         for p in candidates:
-            right_combo.append(p.mac, name_of(p))
-        right_combo.set_active(1 if len(candidates) > 1 else 0)
+            second_combo.append(p.mac, name_of(p))
+        second_combo.set_active(1 if len(candidates) > 1 else 0)
 
         for label, combo in (
-            ("Left half:", left_combo),
-            ("Right half:", right_combo),
+            ("Controller 1:", first_combo),
+            ("Controller 2:", second_combo),
         ):
             row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             cap = Gtk.Label(label=label)
@@ -1081,29 +1098,46 @@ class MainWindow(Gtk.ApplicationWindow):
         if dlg.run() != Gtk.ResponseType.OK:
             dlg.destroy()
             return
-        left_mac = left_combo.get_active_id()
-        right_mac = right_combo.get_active_id()
+        first_mac = first_combo.get_active_id()
+        second_mac = second_combo.get_active_id()
         dlg.destroy()
-        if not left_mac or not right_mac:
+        if not first_mac or not second_mac:
             return
-        if left_mac == right_mac:
-            self._info("Combine Two Joy-Cons", "Left and Right must be different controllers.")
+        if first_mac == second_mac:
+            self._info("Combine Two Joy-Cons", "Pick two different controllers.")
             return
-        left = next(p for p in candidates if p.mac == left_mac)
-        right = next(p for p in candidates if p.mac == right_mac)
+        first = next(p for p in candidates if p.mac == first_mac)
+        second = next(p for p in candidates if p.mac == second_mac)
 
         def task() -> tuple[bool, str]:
             rc, out = run_ngc_config(
-                ["combine", "--players", str(left.player), str(right.player)]
+                ["combine", "--players", str(first.player), str(second.player)]
             )
             if rc == 0:
                 return True, (
-                    f"Combined into one pad (Player {min(left.player, right.player)}).\n\n"
+                    f"Combined into one pad (Player {min(first.player, second.player)}).\n\n"
                     "Bridge restarted — hold Sync on both halves to connect."
                 )
             return False, out[-1500:] if out else "Combine failed."
 
         self._run_task("Combining Joy-Cons", "Updating saved controllers…", task)
+
+    def on_uncombine(self, *_args) -> None:
+        pads = load_pads_from_config()
+        pairs = [g for g in group_pads(pads) if len(g) == 2]
+        if not pairs:
+            self._info("Uncombine Joy-Cons", "No combined pairs saved.")
+            return
+        reps = [g[0] for g in pairs]
+        picked = self._pick_from(
+            "Uncombine Joy-Cons",
+            "Pick the pair to split back into two standalone controllers.",
+            reps,
+            label_fn=lambda p: f"Player {p.player} — Joy-Con 2 (Pair)",
+        )
+        if picked is None:
+            return
+        self.on_uncombine_pads([picked])
 
     def on_uncombine_pads(self, pads: list[PadStatus]) -> None:
         target = pads[0]
