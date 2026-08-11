@@ -189,23 +189,52 @@ def _role(cfg: Config, mac: str, player: int, role: str) -> int:
     return 0
 
 
+def _infer_role(name: str) -> str | None:
+    """Guess which Joy-Con 2 half a saved controller is, from its name."""
+    n = (name or "").lower()
+    if "left" in n or "(l)" in n:
+        return "left"
+    if "right" in n or "(r)" in n:
+        return "right"
+    return None
+
+
 def _combine(
     cfg: Config,
     player_a: int,
     player_b: int,
-    swap: bool = False,
     target_player: int | None = None,
 ) -> int:
     """Combine the Joy-Con 2 halves on two player slots into one pair pad.
 
-    `player_a`'s pad becomes the left half, `player_b`'s the right (swap flips
-    that). Config-only, like `swap` -- no Bluetooth involved. The pair takes
-    the lower slot (or --player N).
+    The left/right roles are inferred from each pad's name, so the player
+    order doesn't matter (`combine --players 1 2` == `2 1`). Config-only,
+    like `swap` -- no Bluetooth involved. The pair takes the lower slot
+    (or --target N).
     """
-    try:
-        updated = cfg.combine_players(
-            player_a, player_b, target_player=target_player, left_first=not swap
+    ca = cfg.find_by_player(player_a)
+    cb = cfg.find_by_player(player_b)
+    if (ca and ca.pair_role) or (cb and cb.pair_role):
+        print(f"Could not combine: P{player_a} or P{player_b} is already half of a pair — uncombine it first.")
+        return 1
+    if not ca or not cb:
+        print(f"Could not combine: need a saved controller on both P{player_a} and P{player_b}.")
+        return 1
+    role_a, role_b = _infer_role(ca.name), _infer_role(cb.name)
+    if not role_a or not role_b:
+        unknown = [e.name or e.mac for e, r in ((ca, role_a), (cb, role_b)) if not r]
+        print(
+            "Could not combine: can't tell which half is left/right for "
+            + ", ".join(unknown)
+            + ". Set the roles manually: ngc role --mac X --player N --role left"
+            " (and --role right for the other half)."
         )
+        return 1
+    if role_a == role_b:
+        print(f"Could not combine: both are {role_a} halves — you need one of each.")
+        return 1
+    try:
+        updated = cfg.combine_players(player_a, player_b, role_a=role_a, target_player=target_player)
     except ValueError as exc:
         print(f"Could not combine: {exc}")
         return 1
@@ -264,7 +293,6 @@ def main(argv=None) -> int:
         help="combine this Joy-Con 2 half with its other half into one player pad (for pair/role)",
     )
     parser.add_argument("--players", nargs=2, type=int, metavar=("A", "B"), help="player slots (for swap / combine / uncombine)")
-    parser.add_argument("--swap", action="store_true", help="with combine: player A becomes the right half (default: left)")
     parser.add_argument("--target", type=int, metavar="N", help="player slot for the combined pair (combine; default: lower of A/B)")
     args = parser.parse_args(argv)
     _setup_logging(args.verbose)
@@ -295,7 +323,7 @@ def main(argv=None) -> int:
 
     if args.command == "combine":
         a, b = (args.players if args.players else (1, 2))
-        return _combine(cfg, a, b, swap=args.swap, target_player=args.target)
+        return _combine(cfg, a, b, target_player=args.target)
 
     if args.command == "uncombine":
         if not args.mac and args.player is None:

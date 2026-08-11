@@ -224,16 +224,18 @@ class Config:
         self,
         player_a: int,
         player_b: int,
+        role_a: str,
         target_player: Optional[int] = None,
-        left_first: bool = True,
     ) -> list[ControllerEntry]:
         """Combine the pads on two player slots into one Joy-Con 2 pair.
 
-        The pad on `player_a` becomes the left half (right with
-        `left_first=False`); `player_b`'s pad becomes the other half. The pair
-        takes the lower of the two slots (or `target_player`). Raises
-        ValueError for bad/ambiguous inputs; returns all entries on success.
+        `role_a` ("left"/"right") is the role of `player_a`'s pad; `player_b`'s
+        pad gets the opposite role. The pair takes the lower of the two slots
+        (or `target_player`). Raises ValueError for bad/ambiguous inputs;
+        returns all entries on success.
         """
+        if role_a not in ("left", "right"):
+            raise ValueError("role_a must be 'left' or 'right'")
         if player_a == player_b:
             raise ValueError("players A and B must be different slots")
         ca = self.find_by_player(player_a)
@@ -244,7 +246,7 @@ class Config:
             raise ValueError(f"P{player_b} is already half of a pair — uncombine it first")
         if not ca or not cb:
             raise ValueError(f"need a saved controller on both P{player_a} and P{player_b}")
-        role_a, role_b = ("left", "right") if left_first else ("right", "left")
+        role_b = "right" if role_a == "left" else "left"
         target = target_player or min(player_a, player_b)
         if target not in (player_a, player_b) and self._player_taken(target, ca.mac, role_a):
             raise ValueError(f"player {target} already in use")
