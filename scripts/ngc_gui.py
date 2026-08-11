@@ -142,6 +142,9 @@ class PadStatus:
     bonded: bool
     connected: bool = False
     battery_pct: int | None = None
+    # "left"/"right" when this MAC is one half of a combined Joy-Con 2 pair
+    # (shares its player slot with the other half); None for standalone pads.
+    pair_role: str | None = None
 
 
 @dataclass
@@ -202,19 +205,21 @@ def load_pads_from_config() -> list[PadStatus]:
         r = _run([str(PY), "-m", "ngc", "list"], timeout=10, cwd=str(PROJECT_DIR))
         pads: list[PadStatus] = []
         row_re = re.compile(
-            r"P(\d+)\s+([0-9A-F:]{17})\s+(.+?)\s+\[(.+)\]\s*$", re.IGNORECASE
+            r"P(\d+)(?:\s+\((left|right)\))?\s+([0-9A-F:]{17})\s+(.+?)\s+\[(.+)\]\s*$",
+            re.IGNORECASE,
         )
         for line in (r.stdout or "").splitlines():
             m = row_re.match(line.strip())
             if not m:
                 continue
-            flags = m.group(4).lower()
+            flags = m.group(5).lower()
             pads.append(
                 PadStatus(
                     int(m.group(1)),
-                    m.group(3).strip(),
-                    m.group(2).upper(),
+                    m.group(4).strip(),
+                    m.group(3).upper(),
                     "bonded" in flags and "needs bond" not in flags,
+                    pair_role=m.group(2).lower() if m.group(2) else None,
                 )
             )
         if pads:
@@ -229,6 +234,7 @@ def load_pads_from_config() -> list[PadStatus]:
                     c.get("name") or "Switch 2 Controller",
                     c["mac"].upper(),
                     bool(c.get("bonded", False)),
+                    pair_role=c.get("pair_role"),
                 )
                 for i, c in enumerate(data.get("controllers") or [])
             ]
@@ -265,9 +271,32 @@ def merge_state_with_pads(state: dict | None, pads: list[PadStatus]) -> list[Pad
                 pad.bonded,
                 connected=bool(live.get("connected")),
                 battery_pct=live.get("battery_pct"),
+                pair_role=pad.pair_role,
             )
         )
     return merged
+
+
+def group_pads(pads: list[PadStatus]) -> list[list[PadStatus]]:
+    """Group the two halves of a combined pair (same player, complementary
+    roles) into one row; everything else stays a single row."""
+    result: list[list[PadStatus]] = []
+    grouped_players: set[int] = set()
+    for pad in pads:
+        if pad.player in grouped_players:
+            continue
+        if pad.pair_role:
+            mate = next(
+                (p for p in pads
+                 if p.player == pad.player and p.pair_role and p.pair_role != pad.pair_role),
+                None,
+            )
+            if mate:
+                result.append([pad, mate])
+                grouped_players.add(pad.player)
+                continue
+        result.append([pad])
+    return result
 
 
 def build_status() -> AppStatus:
@@ -471,6 +500,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._menu = Gtk.Menu()
         self._menu_items = [
             ("Add Controller…", self.on_add),
+            ("Combine Two Joy-Cons…", self.on_combine),
             ("Remove Controller…", self.on_remove),
             ("Remove & Set Up Again…", self.on_remove_and_repair),
             ("Swap Player 1 ↔ 2", self.on_swap_p1_p2),
@@ -563,6 +593,76 @@ class MainWindow(Gtk.ApplicationWindow):
         menu.show()
         return menu
 
+    def _make_pair_menu(self, pads: list[PadStatus]) -> Gtk.Menu:
+        menu = Gtk.Menu()
+
+        def add_item(label: str, cb) -> None:
+            item = Gtk.MenuItem(label=label)
+            item.connect("activate", lambda _w, fn=cb: fn())
+            menu.append(item)
+            item.show()
+
+        def pick_half(action: str) -> None:
+            half = self._pick_from(
+                action,
+                "Pick one half of the pair.",
+                pads,
+            )
+            if half is None:
+                return
+            if action.startswith("Re-bond"):
+                self.on_rebond_pad(half)
+            elif action.startswith("Set Up"):
+                self.on_repair_pad(half)
+            else:
+                self.on_remove_pad(half)
+
+        add_item("Uncombine…", lambda: self.on_uncombine_pads(pads))
+        add_item("Re-bond…", lambda: pick_half("Re-bond Controller"))
+        add_item("Set Up Again…", lambda: pick_half("Set Up Again"))
+        add_item("Remove…", lambda: pick_half("Remove Controller"))
+        menu.show()
+        return menu
+
+    def _build_pair_row(self, pads: list[PadStatus], st: AppStatus) -> Gtk.Widget:
+        halves = sorted(pads, key=lambda p: p.pair_role or "")
+        any_live = any(p.connected for p in halves)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        ctx = row.get_style_context()
+        ctx.add_class("pad-card")
+        if any_live:
+            ctx.add_class("pad-card-live")
+
+        pill = Gtk.Label(label=f"P{halves[0].player}")
+        pill.get_style_context().add_class("player-pill")
+        if any_live:
+            pill.get_style_context().add_class("player-pill-live")
+        row.pack_start(pill, False, False, 0)
+
+        info = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        title = Gtk.Label(label="Joy-Con 2 (Pair)")
+        title.set_xalign(0)
+        title.get_style_context().add_class("pad-title")
+        info.pack_start(title, False, False, 0)
+        for half in halves:
+            side = "Left" if half.pair_role == "left" else "Right"
+            status_text, status_class = pad_status_line(half, st)
+            line = Gtk.Label(label=f"{side} — {status_text}")
+            line.set_xalign(0)
+            line.get_style_context().add_class(status_class)
+            info.pack_start(line, False, False, 0)
+        row.pack_start(info, True, True, 0)
+
+        gear = Gtk.MenuButton()
+        gear.set_relief(Gtk.ReliefStyle.NONE)
+        gear.set_image(Gtk.Image.new_from_icon_name("open-menu-symbolic", Gtk.IconSize.BUTTON))
+        gear.set_popup(self._make_pair_menu(pads))
+        row.pack_end(gear, False, False, 0)
+        row.set_tooltip_text(
+            f"Left: {halves[0].mac}\nRight: {halves[1].mac}"
+        )
+        return row
+
     def _build_pad_row(self, pad: PadStatus, st: AppStatus) -> Gtk.Widget:
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         ctx = row.get_style_context()
@@ -629,8 +729,11 @@ class MainWindow(Gtk.ApplicationWindow):
             empty.set_line_wrap(True)
             self.pads_box.pack_start(empty, False, False, 0)
         else:
-            for pad in st.pads:
-                self.pads_box.pack_start(self._build_pad_row(pad, st), False, False, 0)
+            for group in group_pads(st.pads):
+                if len(group) == 2:
+                    self.pads_box.pack_start(self._build_pair_row(group, st), False, False, 0)
+                else:
+                    self.pads_box.pack_start(self._build_pad_row(group[0], st), False, False, 0)
         self.pads_box.show_all()
 
         if not st.pads:
@@ -642,7 +745,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self.primary_btn.set_label("Add Another Controller")
             self.primary_btn.show()
 
-        if len(st.pads) >= 2:
+        if len(st.pads) >= 2 and not any(p.pair_role for p in st.pads):
             self.swap_btn.show()
         else:
             self.swap_btn.hide()
@@ -722,8 +825,7 @@ class MainWindow(Gtk.ApplicationWindow):
         d.destroy()
         return ok
 
-    def _pick_pad(self, title: str, message: str) -> PadStatus | None:
-        pads = sorted(load_pads_from_config(), key=lambda p: p.player)
+    def _pick_from(self, title: str, message: str, pads: list[PadStatus]) -> PadStatus | None:
         if not pads:
             self._info(title, "No controllers saved yet.")
             return None
@@ -746,7 +848,10 @@ class MainWindow(Gtk.ApplicationWindow):
         box.pack_start(lbl, False, False, 0)
         combo = Gtk.ComboBoxText.new()
         for pad in pads:
-            combo.append(pad.mac, f"Player {pad.player} — {pad.name}")
+            label = f"Player {pad.player} — {pad.name}"
+            if pad.pair_role:
+                label += f" ({pad.pair_role.title()} half)"
+            combo.append(pad.mac, label)
         combo.set_active(0)
         box.pack_start(combo, False, False, 0)
         dlg.show_all()
@@ -756,6 +861,10 @@ class MainWindow(Gtk.ApplicationWindow):
         mac = combo.get_active_id()
         dlg.destroy()
         return next((p for p in pads if p.mac == mac), None)
+
+    def _pick_pad(self, title: str, message: str) -> PadStatus | None:
+        pads = sorted(load_pads_from_config(), key=lambda p: p.player)
+        return self._pick_from(title, message, pads)
 
     def on_add(self, *_args) -> None:
         n = len(load_pads_from_config())
@@ -882,6 +991,13 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def on_swap_p1_p2(self, *_args) -> None:
         pads = load_pads_from_config()
+        if any(p.pair_role for p in pads):
+            self._info(
+                "Swap Players",
+                "Can't swap combined pair slots — uncombine the pair first "
+                "(pair menu → Uncombine).",
+            )
+            return
         if len(pads) < 2:
             self._info("Swap Players", "You need at least two saved controllers.")
             return
@@ -904,6 +1020,126 @@ class MainWindow(Gtk.ApplicationWindow):
             return False, out[-1500:] if out else "Swap failed."
 
         self._run_task("Swapping Players", "Updating player order…", task)
+
+    def on_combine(self, *_args) -> None:
+        pads = load_pads_from_config()
+        candidates = [
+            p for p in pads
+            if not p.pair_role and "joy-con" in (p.name or "").lower()
+        ]
+        if len(candidates) < 2:
+            self._info(
+                "Combine Two Joy-Cons",
+                "You need at least two standalone Joy-Con 2 halves saved first "
+                "(Add Controller).",
+            )
+            return
+
+        dlg = Gtk.Dialog(
+            title="Combine Two Joy-Cons", transient_for=self, modal=True,
+            destroy_with_parent=True,
+        )
+        dlg.add_button("_Cancel", Gtk.ResponseType.CANCEL)
+        dlg.add_button("_Combine", Gtk.ResponseType.OK)
+        box = dlg.get_content_area()
+        box.set_margin_start(20)
+        box.set_margin_end(20)
+        box.set_margin_top(16)
+        box.set_margin_bottom(8)
+        box.set_spacing(10)
+        lbl = Gtk.Label(label="Pick which half is Left and which is Right, and the "
+                              "player slot they'll share.")
+        lbl.set_line_wrap(True)
+        lbl.set_xalign(0)
+        lbl.get_style_context().add_class("detail")
+        box.pack_start(lbl, False, False, 0)
+
+        def name_of(p: PadStatus) -> str:
+            return f"{p.name} (P{p.player})"
+
+        left_combo = Gtk.ComboBoxText.new()
+        for p in candidates:
+            left_combo.append(p.mac, name_of(p))
+        left_combo.set_active(0)
+        right_combo = Gtk.ComboBoxText.new()
+        for p in candidates:
+            right_combo.append(p.mac, name_of(p))
+        right_combo.set_active(1 if len(candidates) > 1 else 0)
+
+        used = {p.player for p in pads}
+        default_player = min(candidates[0].player, candidates[1].player)
+        player_combo = Gtk.ComboBoxText.new()
+        for n in range(1, 9):
+            suffix = " (in use)" if n in used else ""
+            player_combo.append(str(n), f"Player {n}{suffix}")
+        player_combo.set_active(default_player - 1)
+
+        for label, combo in (
+            ("Left half:", left_combo),
+            ("Right half:", right_combo),
+            ("Shared player slot:", player_combo),
+        ):
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            cap = Gtk.Label(label=label)
+            cap.set_xalign(0)
+            cap.get_style_context().add_class("detail")
+            row.pack_start(cap, False, False, 0)
+            row.pack_start(combo, True, True, 0)
+            box.pack_start(row, False, False, 0)
+        dlg.show_all()
+        if dlg.run() != Gtk.ResponseType.OK:
+            dlg.destroy()
+            return
+        left_mac = left_combo.get_active_id()
+        right_mac = right_combo.get_active_id()
+        player = int(player_combo.get_active_id())
+        dlg.destroy()
+        if not left_mac or not right_mac:
+            return
+        if left_mac == right_mac:
+            self._info("Combine Two Joy-Cons", "Left and Right must be different controllers.")
+            return
+        left = next(p for p in candidates if p.mac == left_mac)
+        right = next(p for p in candidates if p.mac == right_mac)
+
+        def task() -> tuple[bool, str]:
+            rc, out = run_ngc_config(
+                ["role", "--mac", left.mac, "--player", str(player), "--role", "left"],
+                restart=False,
+            )
+            if rc != 0:
+                return False, out[-1500:] if out else "Could not set left half."
+            rc, out = run_ngc_config(
+                ["role", "--mac", right.mac, "--player", str(player), "--role", "right"],
+                restart=True,
+            )
+            if rc != 0:
+                return False, out[-1500:] if out else "Could not set right half."
+            return True, (
+                f"Combined into one pad (Player {player}).\n\n"
+                "Bridge restarted — hold Sync on both halves to connect."
+            )
+
+        self._run_task("Combining Joy-Cons", "Updating saved controllers…", task)
+
+    def on_uncombine_pads(self, pads: list[PadStatus]) -> None:
+        target = pads[0]
+        if not self._confirm(
+            "Uncombine Joy-Cons",
+            "Split this pair back into two standalone controllers?\n\n"
+            f"{target.name} keeps Player {target.player}; the other half moves "
+            "to the next free slot.",
+        ):
+            return
+
+        def task() -> tuple[bool, str]:
+            rc, out = run_ngc_config(["uncombine", "--mac", target.mac])
+            if rc == 0:
+                return True, "Uncombined — both halves are standalone again. " \
+                              "Hold Sync on each to connect."
+            return False, out[-1500:] if out else "Uncombine failed."
+
+        self._run_task("Uncombining", "Updating saved controllers…", task)
 
     def on_rebond(self, *_args) -> None:
         if not self._confirm(

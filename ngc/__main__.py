@@ -143,6 +143,9 @@ def _list(cfg: Config) -> int:
 
 
 def _remove(cfg: Config, mac: str) -> int:
+    # If the MAC is half of a combined pair, free the other half first so it
+    # doesn't stay paired to a dead slot (it becomes a standalone controller).
+    cfg.uncombine_pair(mac)
     if not cfg.remove_controller(mac):
         print(f"Controller {mac} is not in your saved list.")
         return 1
@@ -186,6 +189,18 @@ def _role(cfg: Config, mac: str, player: int, role: str) -> int:
     return 0
 
 
+def _uncombine(cfg: Config, mac: str) -> int:
+    """Split a combined Joy-Con 2 pair back into two standalone pads."""
+    updated = cfg.uncombine_pair(mac)
+    if updated is None:
+        print(f"{mac.upper()} is not part of a combined pair.")
+        return 1
+    cfg.save()
+    names = ", ".join(f"{e.name or e.mac} (P{e.player})" for e in updated)
+    print(f"Uncombined: {names}. Restart the bridge to apply.")
+    return 0
+
+
 def _run(cfg: Config) -> int:
     from .bridge import Bridge
 
@@ -211,7 +226,7 @@ def _run(cfg: Config) -> int:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="ngc", description="Switch 2 controller bridge (GameCube / Pro Controller 2 / Joy-Con 2)")
     parser.add_argument("command", nargs="?", default="run",
-                        choices=["run", "pair", "rebond", "list", "remove", "swap", "role"])
+                        choices=["run", "pair", "rebond", "list", "remove", "swap", "role", "uncombine"])
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--timeout", type=float, default=30.0, help="pairing scan timeout")
     parser.add_argument("--mac", help="controller MAC (for remove)")
@@ -247,6 +262,12 @@ def main(argv=None) -> int:
             print("Usage: ngc role --mac AA:BB:CC:DD:EE:FF --player N --role left/right")
             return 1
         return _role(cfg, args.mac, args.player, args.role)
+
+    if args.command == "uncombine":
+        if not args.mac:
+            print("Usage: ngc uncombine --mac AA:BB:CC:DD:EE:FF")
+            return 1
+        return _uncombine(cfg, args.mac)
 
     if args.command == "list":
         return _list(cfg)

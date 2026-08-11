@@ -179,6 +179,40 @@ class Config:
         self.controllers = [c for c in self.controllers if c["mac"].upper() != mac]
         return len(self.controllers) < before
 
+    def _next_free_player(self, exclude: set[int] | None = None) -> int | None:
+        used = {c.get("player", 0) for c in self.controllers}
+        if exclude:
+            used -= set(exclude)
+        return next((p for p in range(1, 9) if p not in used), None)
+
+    def uncombine_pair(self, mac: str) -> Optional[list[ControllerEntry]]:
+        """Split a combined Joy-Con 2 pair back into two standalone pads.
+
+        The half named by `mac` keeps its player slot; the other half moves to
+        the next free slot (two halves shared one player number, and two
+        standalone controllers can't). Returns the updated entries, or None
+        if `mac` isn't in a pair.
+        """
+        mac = mac.upper()
+        entries = self.entries()
+        target = next((e for e in entries if e.mac.upper() == mac), None)
+        if not target or not target.pair_role:
+            return None
+        mate = next(
+            (e for e in entries
+             if e.mac.upper() != mac and e.player == target.player and e.pair_role),
+            None,
+        )
+        for c in self.controllers:
+            if c["mac"].upper() == mac:
+                c["pair_role"] = None
+            elif mate and c["mac"].upper() == mate.mac.upper():
+                c["pair_role"] = None
+                # The target keeps its slot; the mate needs a free one. `used`
+                # already includes the target's player, so no exclude needed.
+                c["player"] = self._next_free_player() or target.player
+        return self.entries()
+
     def swap_players(self, player_a: int, player_b: int) -> bool:
         ca = cb = None
         for c in self.controllers:
