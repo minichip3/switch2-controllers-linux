@@ -227,6 +227,60 @@ def fix_joycon2_left_mapping(mapping: str) -> str:
     return ",".join([guid, name, *NGC_JOYCON2_LEFT_BUTTONS, *NGC_JOYCON2_LEFT_AXES])
 
 
+# Solo Right Joy-Con 2, same kernel hid-nintendo convention (see
+# ngc/gamepad.py's JOYCON2_RIGHT_BUTTON_MAP doc comment). SDL enumerates
+# the declared buttons in evdev code order, so b0..b10 here are:
+# b0=BTN_SOUTH(B) b1=BTN_EAST(A) b2=BTN_NORTH(X) b3=BTN_WEST(Y)
+# b4=SL(BTN_TL) b5=R(BTN_TR) b6=SR(BTN_TL2) b7=ZR(BTN_TR2)
+# b8=PLUS(BTN_START) b9=HOME(BTN_MODE) b10=stick-click(BTN_THUMBR).
+#
+# This is 미니's own hand-tuned layout from Steam's personalization UI
+# (same deal as the Left half: Steam special-cases the Nintendo vendor
+# and ignores gamecontrollerdb for it, so this DB line serves SDL-based
+# emulators / non-Steam SDL consumers while Steam keeps using the
+# personalization cached in its configset_57e-2066-*.vdf), captured here
+# so `--write` reproduces it instead of a guess:
+#   guide=HOME, leftshoulder=SL, rightshoulder=SR, start=PLUS,
+#   leftstick=stick-click, a/b/x/y = face buttons as tuned in Steam
+#   (physical A lands on SDL a, physical Y on SDL y, physical B on
+#   SDL x, physical X on SDL b -- the natural rotation of holding the
+#   right half sideways).
+# R (b5) and ZR (b7) deliberately unbound, mirroring the Left half's
+# L/ZL -- awkward to reach solo sideways.
+#
+# Axes: the solo Right Joy-Con's one stick is presented as the primary
+# (ABS_X/Y) stick after device.py's stick-source swap, and the uinput
+# Y axis is emitted negated, so SDL sees the two axes effectively
+# swapped plus one inverted; Steam's tuning compensates with
+# leftx:a1~, lefty:a0.
+NGC_JOYCON2_RIGHT_BUTTONS = (
+    "b:b2",
+    "a:b1",
+    "y:b3",
+    "x:b0",
+    "leftstick:b10",
+    "leftshoulder:b4",
+    "rightshoulder:b6",
+    "start:b8",
+    "guide:b9",
+)
+
+NGC_JOYCON2_RIGHT_AXES = (
+    "leftx:a1~",
+    "lefty:a0",
+    "platform:Linux",
+)
+
+
+def fix_joycon2_right_mapping(mapping: str) -> str:
+    """Build a complete gamecontrollerdb line for the solo Right Joy-Con 2 pad."""
+    parts = mapping.split(",")
+    if len(parts) < 2:
+        return mapping
+    guid, name = parts[0], parts[1]
+    return ",".join([guid, name, *NGC_JOYCON2_RIGHT_BUTTONS, *NGC_JOYCON2_RIGHT_AXES])
+
+
 def mapping_for_pad(name: str, mapping: str | None) -> str | None:
     if not mapping:
         return None
@@ -235,6 +289,8 @@ def mapping_for_pad(name: str, mapping: str | None) -> str | None:
         return fix_gamecube_mapping(mapping)
     if "joy-con 2 (left)" in lname:
         return fix_joycon2_left_mapping(mapping)
+    if "joy-con 2 (right)" in lname:
+        return fix_joycon2_right_mapping(mapping)
     return mapping
 
 
