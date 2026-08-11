@@ -215,6 +215,64 @@ def _force_bt_le_scan_off(*, force: bool = False) -> None:
             pass
 
 
+def _bluez_device_path(mac: str) -> str:
+    return f"/org/bluez/hci{_adapter_index()}/dev_{mac.upper().replace(':', '_')}"
+
+
+# MACs we've told BlueZ to leave alone (Device1.Blocked=true). Tracks only
+# the *current process*'s view; the flag itself persists in bluetoothd's
+# device storage across restarts, so a pad blocked by a previous bridge run
+# stays blocked until explicitly unblocked (ngc remove / bridge shutdown).
+_BLUEZ_BLOCKED: set[str] = set()
+
+
+def _bluez_set_blocked(mac: str, blocked: bool) -> None:
+    """Tell BlueZ a pad is handled by this bridge (Blocked=true) so
+    bluetoothd / Steam Input / other D-Bus clients never race our raw ATT
+    connect with their own connection attempt, or unblock it (false) so it
+    can be managed normally again.
+
+    Why "Blocked" is the right lever: the pads are never SMP-bonded (Switch 2
+    controllers drop any link that attempts SMP pairing -- see att.py), so
+    there is no LTK to hand BlueZ -- "marking it paired" in BlueZ terms
+    means flagging the device as blocked, which makes bluetoothd ignore it
+    for auto-connect, profile connections and any client's
+    Device1.Connect(). Our raw kernel L2CAP sockets (att.py) never consult
+    this flag, so our own connects and the raw pairing/rebond handshake are
+    unaffected; only BlueZ-mediated connects (Steam, bluetoothctl) are.
+
+    Never raises.
+    """
+    if not mac:
+        return
+    _run_quiet(
+        ["busctl", "call", "org.bluez", _bluez_device_path(mac),
+         "org.freedesktop.DBus.Properties", "Set",
+         "org.bluez.Device1", "Blocked", "b", "true" if blocked else "false"],
+        timeout=1.5,
+    )
+
+
+def _ensure_bluez_blocked(mac: str) -> None:
+    """Idempotent per-process version of _bluez_set_blocked(True): avoids
+    re-issuing the D-Bus call on every advertisement for an already-blocked
+    pad. Safe to call from the scan callback (cheap after the first call)."""
+    if not mac or mac in _BLUEZ_BLOCKED:
+        return
+    _bluez_set_blocked(mac, True)
+    _BLUEZ_BLOCKED.add(mac)
+
+
+def _bluez_unblock(mac: str) -> None:
+    """Explicitly unblock a pad (ngc remove / bridge shutdown). Always calls
+    BlueZ even when this process never blocked it -- the flag may persist
+    from an earlier bridge run's storage."""
+    if not mac:
+        return
+    _bluez_set_blocked(mac, False)
+    _BLUEZ_BLOCKED.discard(mac)
+
+
 def _bluez_remove_device(mac: str) -> None:
     """Drop BlueZ's Device object so it can't race our raw ATT connect.
 
@@ -235,10 +293,14 @@ def _bluez_remove_device(mac: str) -> None:
     """
     if not mac:
         return
-    path = f"/org/bluez/hci{_adapter_index()}/dev_{mac.upper().replace(':', '_')}"
+    mac = mac.upper()
+    # Destroying the Device object drops its Blocked flag with it; the next
+    # advertisement recreates the object unblocked, so forget our tracking
+    # and let _ensure_bluez_blocked re-flag it on sight.
+    _BLUEZ_BLOCKED.discard(mac)
     _run_quiet(
         ["busctl", "call", "org.bluez", f"/org/bluez/hci{_adapter_index()}",
-         "org.bluez.Adapter1", "RemoveDevice", "o", path],
+         "org.bluez.Adapter1", "RemoveDevice", "o", _bluez_device_path(mac)],
         timeout=1.5,
     )
 
@@ -468,6 +530,12 @@ class _ConnectHub:
             if addr not in hub._logged:
                 hub._logged.add(addr)
                 logger.info("saw %s (%s)", addr, mode)
+            # Flag the pad as handled by us in BlueZ so bluetoothd / Steam
+            # Input don't race our raw connect with their own connection
+            # attempt during its ~10s advertising window (the strain that
+            # used to need a power cycle to clear). Idempotent; raw L2CAP
+            # connects ignore the flag entirely.
+            _ensure_bluez_blocked(addr)
 
         hub._scanner = BleakScanner(detection_callback=on_adv)
         logger.info("scanning for configured controllers (press a button or hold Sync)")
@@ -708,6 +776,11 @@ class _ConnectHub:
                         ctrl.att.dst_type = dst
                         if worker.activate(ctrl):
                             worker._ready.set()
+                            # BlueZ now has a Device object for the linked
+                            # peer (mgmt connection event); keep it flagged
+                            # as handled so nothing tries to grab the pad
+                            # mid-session.
+                            _ensure_bluez_blocked(mac)
                             return True, "ok"
                         ctrl.close()
                         return False, "session setup failed"
@@ -1279,6 +1352,13 @@ class Bridge:
             self.dsu.stop()
         if self.hub._executor is not None:
             self.hub._executor.shutdown(wait=False, cancel_futures=True)
+        # Graceful shutdown: give the pads back to BlueZ so they're usable
+        # by other tools (Steam, bluetoothctl) once the bridge is stopped.
+        # A hard kill skips this, but the pads just stay Blocked until the
+        # next bridge start re-flags them or `ngc remove` unblocks.
+        for mac in sorted(_BLUEZ_BLOCKED):
+            _bluez_set_blocked(mac, False)
+        _BLUEZ_BLOCKED.clear()
         clear_state()
 
     def stop(self) -> None:
