@@ -245,7 +245,27 @@ class SwitchController:
 
     def _read_calibration(self) -> None:
         self.left_calib = self._read_stick(P.CALIBRATION_USER_JOYSTICK_1, P.CALIBRATION_JOYSTICK_1)
-        self.right_calib = self._read_stick(P.CALIBRATION_USER_JOYSTICK_2, P.CALIBRATION_JOYSTICK_2)
+        if self.product_id == P.JOYCON2_RIGHT_PID:
+            # A lone Right Joy-Con reports its one stick through the
+            # "stick 2" field, but on this hardware the calibration record
+            # for it lives at the addresses the Pro layout calls "stick 1"
+            # (0x001FC042 / 0x000130A8) -- the "stick 2" addresses
+            # (0x001FC062 / 0x000130E8) read all-0xFF, which made the stick
+            # sit hard to one side (center=4095). Probe candidates in order
+            # of likelihood and use the first that parses as a real
+            # calibration; fall back to sane defaults if none do.
+            self.right_calib, src = self._read_stick_candidates([
+                (P.CALIBRATION_USER_JOYSTICK_1, P.CALIBRATION_JOYSTICK_1),
+                (P.CALIBRATION_USER_JOYSTICK_2, P.CALIBRATION_JOYSTICK_2),
+                (P.CALIBRATION_USER_JOYSTICK_1 + 0x0B, P.CALIBRATION_JOYSTICK_1 + 0x0B),
+            ])
+            if self.right_calib is None:
+                logger.warning("no valid Right Joy-Con stick calibration found; using defaults")
+                self.right_calib = P.StickCalibration((2048, 2048), (1500, 1500), (1500, 1500))
+            else:
+                logger.info("right stick calibration from %s", src)
+        else:
+            self.right_calib = self._read_stick(P.CALIBRATION_USER_JOYSTICK_2, P.CALIBRATION_JOYSTICK_2)
         if self.has_analog_triggers:
             try:
                 cal = self.read_memory(0x02, P.CALIBRATION_GC_TRIGGERS)
@@ -254,6 +274,38 @@ class SwitchController:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("GC trigger calibration read failed: %s", exc)
         logger.info("calib L=%s R=%s triggers=%s", self.left_calib, self.right_calib, self.trigger_neutral)
+
+    @staticmethod
+    def _valid_stick_cal(data: bytes) -> bool:
+        """True if 9 bytes parse as a real stick-calibration record
+        (center near mid-range, sane positive/negative excursions)."""
+        if len(data) < 9:
+            return False
+        cx, cy = P.get_stick_xy(data[0:3])
+        mx, my = P.get_stick_xy(data[3:6])
+        nx, ny = P.get_stick_xy(data[6:9])
+        in_center = lambda v: 512 <= v <= 3584
+        in_dev = lambda v: 256 <= v <= 3072
+        return (
+            in_center(cx) and in_center(cy)
+            and in_dev(mx) and in_dev(my)
+            and in_dev(nx) and in_dev(ny)
+        )
+
+    def _read_stick_candidates(
+        self, pairs: list[tuple[int, int]]
+    ) -> tuple[Optional[P.StickCalibration], Optional[str]]:
+        """Probe (user, factory) calibration address pairs, returning the
+        first record that parses as a real stick calibration."""
+        for user_addr, factory_addr in pairs:
+            for addr, kind in ((user_addr, "user"), (factory_addr, "factory")):
+                try:
+                    data = self.read_memory(0x0B, addr)
+                except Exception:  # noqa: BLE001
+                    continue
+                if self._valid_stick_cal(data):
+                    return P.StickCalibration.from_bytes(data), f"{kind}@{addr:#x}"
+        return None, None
 
     def _read_stick(self, user_addr: int, factory_addr: int) -> P.StickCalibration:
         data = self.read_memory(0x0B, user_addr)
