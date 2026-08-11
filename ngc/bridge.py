@@ -525,13 +525,23 @@ class _ConnectHub:
         s, err = ctrl.att._start_connect(dst)
         if s is None:
             return False, err
-        deadline = time.monotonic() + _CONNECT_ATTEMPT_S
+        t0 = time.monotonic()
+        deadline = t0 + _CONNECT_ATTEMPT_S
+        poll_n = 0
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 s.close()
+                logger.info("TEMP-DEBUG dst=%s gave up after %d polls, %.3fs elapsed", dst, poll_n, time.monotonic() - t0)
                 return False, "timeout (adapter may still be scanning)"
-            status, detail = ctrl.att._poll_connect(s, min(_POLL_SUBINTERVAL_S, remaining))
+            poll_timeout = min(_POLL_SUBINTERVAL_S, remaining)
+            poll_start = time.monotonic()
+            status, detail = ctrl.att._poll_connect(s, poll_timeout)
+            poll_n += 1
+            logger.info(
+                "TEMP-DEBUG dst=%s poll#%d requested=%.3fs actual=%.3fs status=%s",
+                dst, poll_n, poll_timeout, time.monotonic() - poll_start, status,
+            )
             if status == "connected":
                 ctrl.att._finish_connect(s)
                 return True, "ok"
