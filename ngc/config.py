@@ -40,6 +40,10 @@ class ControllerEntry:
     player: int = 1
     name: str = ""
     bonded: bool = False
+    # "left"/"right" when this MAC is one half of a Joy-Con 2 pair that shares
+    # its player slot with its other half (see bridge._PairGroup); None for a
+    # standalone controller (Pro / GameCube / solo Joy-Con).
+    pair_role: Optional[str] = None
 
 
 @dataclass
@@ -96,6 +100,7 @@ class Config:
                 player=c.get("player", i + 1),
                 name=c.get("name", ""),
                 bonded=bool(c.get("bonded", False)),
+                pair_role=c.get("pair_role"),
             )
             for i, c in enumerate(self.controllers)
         ]
@@ -112,33 +117,61 @@ class Config:
                 return bool(c.get("bonded", False))
         return False
 
-    def add_controller(self, mac: str, name: str = "", player: int | None = None) -> ControllerEntry:
-        """Add (or update) a controller, assigning the next free player slot."""
+    def _player_taken(self, player: int, mac: str, pair_role: Optional[str]) -> bool:
+        """True if `player` can't be assigned to `mac`/`pair_role`.
+
+        Two MACs may share a player slot only as complementary Joy-Con 2
+        halves (one "left", one "right") -- anything else (same role twice,
+        or either side unset) is a real conflict.
+        """
+        for c in self.controllers:
+            if c["mac"].upper() == mac or c.get("player") != player:
+                continue
+            other_role = c.get("pair_role")
+            if pair_role and other_role and pair_role != other_role:
+                continue
+            return True
+        return False
+
+    def add_controller(
+        self, mac: str, name: str = "", player: int | None = None, pair_role: str | None = None
+    ) -> ControllerEntry:
+        """Add (or update) a controller, assigning the next free player slot.
+
+        `pair_role` ("left"/"right") lets this MAC share a player slot with
+        its other Joy-Con 2 half instead of taking a slot of its own.
+        """
         mac = mac.upper()
+        if pair_role not in (None, "left", "right"):
+            raise ValueError("pair_role must be 'left', 'right', or None")
         for c in self.controllers:
             if c["mac"].upper() == mac:
                 if name:
                     c["name"] = name
+                if pair_role is not None:
+                    c["pair_role"] = pair_role
                 if player is not None:
-                    used = {x.get("player") for x in self.controllers if x["mac"].upper() != mac}
-                    if player in used:
+                    if self._player_taken(player, mac, pair_role if pair_role is not None else c.get("pair_role")):
                         raise ValueError(f"player {player} already in use")
                     c["player"] = player
                 return ControllerEntry(
-                    c["mac"], c.get("player", 1), c.get("name", ""), bool(c.get("bonded", False))
+                    c["mac"], c.get("player", 1), c.get("name", ""), bool(c.get("bonded", False)),
+                    c.get("pair_role"),
                 )
         if player is not None:
-            if any(c.get("player") == player for c in self.controllers):
+            if self._player_taken(player, mac, pair_role):
                 raise ValueError(f"player {player} already in use")
             assigned = player
         else:
+            if pair_role:
+                raise ValueError("pair_role requires an explicit --player slot")
             used = {c.get("player", 0) for c in self.controllers}
             assigned = next((p for p in range(1, 9) if p not in used), None)
             if assigned is None:
                 raise ValueError("maximum 8 controllers already saved")
-        entry = {"mac": mac, "player": assigned, "name": name, "bonded": False}
+        entry = {"mac": mac, "player": assigned, "name": name, "bonded": False, "pair_role": pair_role}
         self.controllers.append(entry)
-        return ControllerEntry(mac, assigned, name, False)
+        return ControllerEntry(mac, assigned, name, False, pair_role)
 
     def remove_controller(self, mac: str) -> bool:
         mac = mac.upper()
@@ -162,7 +195,8 @@ class Config:
         for c in self.controllers:
             if c.get("player") == player:
                 return ControllerEntry(
-                    c["mac"], c.get("player", 1), c.get("name", ""), bool(c.get("bonded", False))
+                    c["mac"], c.get("player", 1), c.get("name", ""), bool(c.get("bonded", False)),
+                    c.get("pair_role"),
                 )
         return None
 

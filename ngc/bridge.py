@@ -19,7 +19,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from bleak import BleakScanner
 
@@ -28,7 +28,7 @@ from . import protocol as P
 from .config import CONFIG_DIR, Config, ControllerEntry
 from .device import SwitchController
 from .dsu import DSUServer
-from .gamepad import SwitchGamepad
+from .gamepad import JOYCON2_PAIR_BUTTON_MAP, JOYCON2_PAIR_PID, SwitchGamepad
 from .motion_evdev import MotionEvdev
 from .status import BridgeState, ControllerState, clear_state, write_state
 
@@ -454,6 +454,123 @@ class _ConnectHub:
             return False, last_detail
 
 
+class _PairGroup:
+    """Shared virtual gamepad + DSU slot for a left+right Joy-Con 2 pair that
+    share one player slot (see ControllerEntry.pair_role).
+
+    Built once, on whichever half connects first, and lives for the whole
+    bridge process -- Steam only notices a uinput device disappear on bridge
+    restart anyway, so there is no benefit to tearing the shared pad down and
+    recreating it as halves connect/disconnect. A disconnected half's
+    contribution to the pad just idles at neutral (buttons up, stick
+    centered) until it reconnects; the other half keeps working normally.
+    """
+
+    def __init__(
+        self,
+        player: int,
+        dsu: Optional[DSUServer],
+        on_topology_change: Optional[callable] = None,
+    ):
+        self.player = player
+        self.dsu = dsu
+        self.on_topology_change = on_topology_change
+        self.slot = max(0, min(3, player - 1))
+        self.gamepad: Optional[SwitchGamepad] = None
+        self._lock = threading.Lock()
+        self._connected = {"left": False, "right": False}
+        self._mac = {"left": "", "right": ""}
+        self._battery_mv: dict[str, Optional[int]] = {"left": None, "right": None}
+        # Per-side latest (buttons, stick_xy, lt, rt); neutral until that
+        # half has reported input or has disconnected.
+        _neutral = (0, (0.0, 0.0), 0, 0)
+        self._contrib = {"left": _neutral, "right": _neutral}
+        self._last_report: Optional[P.InputReport] = None
+        # Each physical half has its own HD-rumble motor; the shared pad has
+        # one rumble_cb slot, so fan a single force-feedback signal out to
+        # whichever half(s) are currently connected.
+        self._rumble_targets: dict[str, Optional[Callable[[float, float], None]]] = {
+            "left": None, "right": None,
+        }
+
+    def ensure_gamepad(self, name: str, mac: str, enable_rumble: bool) -> None:
+        with self._lock:
+            if self.gamepad is not None:
+                return
+            self.gamepad = SwitchGamepad(
+                name=name, button_map=JOYCON2_PAIR_BUTTON_MAP, product=JOYCON2_PAIR_PID, mac=mac,
+            )
+            if enable_rumble:
+                self.gamepad.rumble_cb = self._fanout_rumble
+        logger.info("virtual gamepad ready (paired): %s", name)
+
+    def set_rumble_target(self, side: str, cb: Optional[Callable[[float, float], None]]) -> None:
+        with self._lock:
+            self._rumble_targets[side] = cb
+
+    def _fanout_rumble(self, strong: float, weak: float) -> None:
+        with self._lock:
+            targets = [cb for cb in self._rumble_targets.values() if cb is not None]
+        for cb in targets:
+            try:
+                cb(strong, weak)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def set_connected(self, side: str, connected: bool, mac: str = "", battery_mv: Optional[int] = None) -> None:
+        with self._lock:
+            self._connected[side] = connected
+            if connected:
+                self._mac[side] = mac
+                self._battery_mv[side] = battery_mv
+            else:
+                self._contrib[side] = (0, (0.0, 0.0), 0, 0)
+            any_connected = self._connected["left"] or self._connected["right"]
+            dsu_mac = self._mac["right"] or self._mac["left"]
+            mvs = [v for v in self._battery_mv.values() if v]
+            dsu_battery_mv = min(mvs) if mvs else 0
+        self._push()
+        if self.dsu is not None:
+            self.dsu.set_slot(self.slot, any_connected, mac=dsu_mac, battery_mv=dsu_battery_mv)
+        if self.on_topology_change is not None:
+            self.on_topology_change()
+
+    def update(self, side: str, report: P.InputReport, stick: tuple[float, float], lt: int, rt: int) -> None:
+        with self._lock:
+            self._contrib[side] = (report.buttons, stick, lt, rt)
+            self._last_report = report
+        self._push()
+
+    def _push(self) -> None:
+        with self._lock:
+            lb, lstick, llt, lrt = self._contrib["left"]
+            rb, rstick, rlt, rrt = self._contrib["right"]
+            last_report = self._last_report
+        combined_buttons = lb | rb
+        lt, rt = max(llt, rlt), max(lrt, rrt)
+        if self.gamepad is not None:
+            self.gamepad.update(combined_buttons, lstick, rstick, lt, rt)
+        if self.dsu is not None and last_report is not None:
+            from dataclasses import replace
+
+            # Motion (accel/gyro) can only come from one physical half at a
+            # time -- DSU reflects whichever side's report arrived last.
+            dsu_report = replace(last_report, buttons=combined_buttons)
+            sticks = (
+                _stick_to_dsu(lstick[0]), _stick_to_dsu(lstick[1]),
+                _stick_to_dsu(rstick[0]), _stick_to_dsu(rstick[1]),
+            )
+            self.dsu.update(self.slot, dsu_report, sticks, (lt, rt))
+
+    def close(self) -> None:
+        if self.gamepad is not None:
+            self.gamepad.release_all()
+            self.gamepad.close()
+            self.gamepad = None
+        if self.dsu is not None:
+            self.dsu.set_slot(self.slot, False)
+
+
 class _Worker:
     """Owns input streaming, rumble, and virtual gamepad for one controller session."""
 
@@ -465,6 +582,7 @@ class _Worker:
         hub: _ConnectHub,
         dsu: Optional[DSUServer] = None,
         on_topology_change: Optional[callable] = None,
+        pair_group: Optional[_PairGroup] = None,
     ):
         self.entry = entry
         self.config = config
@@ -472,6 +590,7 @@ class _Worker:
         self.hub = hub
         self.dsu = dsu
         self.on_topology_change = on_topology_change
+        self.pair_group = pair_group
         self.slot = max(0, min(3, entry.player - 1))
         self.gamepad: Optional[SwitchGamepad] = None
         self.motion: Optional[MotionEvdev] = None
@@ -500,6 +619,16 @@ class _Worker:
 
     def _on_input(self, ctrl: SwitchController, report: P.InputReport) -> None:
         (lx, ly), (rx, ry), lt, rt = ctrl.calibrated_input(report)
+        if self.pair_group is not None:
+            # calibrated_input always reports a solo half's one physical
+            # stick through the (lx, ly) slot (see device.calibrated_input);
+            # route it to the pair's left_stick or right_stick output by
+            # which physical half this worker actually is.
+            stick = (lx, ly)
+            self.pair_group.update(self.entry.pair_role, report, stick, lt, rt)
+            if self.motion is not None:
+                self.motion.update(report)
+            return
         if self.gamepad is not None:
             self.gamepad.update(report.buttons, (lx, ly), (rx, ry), lt, rt)
         if self.motion is not None:
@@ -573,13 +702,25 @@ class _Worker:
                 self.entry.bonded = True
                 logger.info("bonded %s to %s", mac, self.config.adapter_mac)
             self.controller = ctrl
-            self._ensure_gamepad(ctrl)
-            if self.gamepad is not None and self.config.enable_rumble:
-                self.gamepad.rumble_cb = self._on_rumble
-            if self.dsu is not None:
-                self.dsu.set_slot(self.slot, True, mac=mac, battery_mv=ctrl.battery_mv or 0)
-            if self.on_topology_change is not None:
-                self.on_topology_change()
+            if self.pair_group is not None:
+                name = f"Joy-Con 2 (Pair) (P{self.entry.player})"
+                self.pair_group.ensure_gamepad(name, mac, self.config.enable_rumble)
+                self.pair_group.set_rumble_target(self.entry.pair_role, self._on_rumble)
+                if self.motion is None:
+                    self.motion = MotionEvdev(
+                        f"{ctrl.name} (P{self.entry.player})", mac, product=ctrl.product_id
+                    )
+                self.pair_group.set_connected(
+                    self.entry.pair_role, True, mac=mac, battery_mv=ctrl.battery_mv
+                )
+            else:
+                self._ensure_gamepad(ctrl)
+                if self.gamepad is not None and self.config.enable_rumble:
+                    self.gamepad.rumble_cb = self._on_rumble
+                if self.dsu is not None:
+                    self.dsu.set_slot(self.slot, True, mac=mac, battery_mv=ctrl.battery_mv or 0)
+                if self.on_topology_change is not None:
+                    self.on_topology_change()
             if self.hub.bridge is not None:
                 self.hub.bridge._publish_state()
             self.ever_connected = True
@@ -596,6 +737,9 @@ class _Worker:
                 ctrl.close()
             except Exception:  # noqa: BLE001
                 pass
+        if self.pair_group is not None:
+            self.pair_group.set_rumble_target(self.entry.pair_role, None)
+            self.pair_group.set_connected(self.entry.pair_role, False)
         if self.gamepad is not None:
             self.gamepad.rumble_cb = None
             self.gamepad.close()
@@ -606,20 +750,27 @@ class _Worker:
             self.motion = None
 
     def _teardown_session(self, *, full: bool = False) -> None:
-        if self.gamepad is not None:
-            self.gamepad.rumble_cb = None
-            if full:
-                self.gamepad.close()
-                self.gamepad = None
-                self._gamepad_product = None
-            else:
-                self.gamepad.release_all()
-        if self.motion is not None:
-            if full:
+        if self.pair_group is not None:
+            self.pair_group.set_rumble_target(self.entry.pair_role, None)
+            self.pair_group.set_connected(self.entry.pair_role, False)
+            if full and self.motion is not None:
                 self.motion.close()
                 self.motion = None
-        if self.dsu is not None:
-            self.dsu.set_slot(self.slot, False)
+        else:
+            if self.gamepad is not None:
+                self.gamepad.rumble_cb = None
+                if full:
+                    self.gamepad.close()
+                    self.gamepad = None
+                    self._gamepad_product = None
+                else:
+                    self.gamepad.release_all()
+            if self.motion is not None:
+                if full:
+                    self.motion.close()
+                    self.motion = None
+            if self.dsu is not None:
+                self.dsu.set_slot(self.slot, False)
         if self.controller:
             self.controller.close()
             self.controller = None
@@ -649,6 +800,7 @@ class Bridge:
         self.config = config
         self._stop = threading.Event()
         self.workers: list[_Worker] = []
+        self.pair_groups: dict[int, _PairGroup] = {}
         self.dsu: Optional[DSUServer] = None
         self.hub = _ConnectHub(config, self._stop, bridge=self)
         self._reorder_timer: Optional[threading.Timer] = None
@@ -769,6 +921,12 @@ class Bridge:
         threading.Thread(target=self._state_loop, name="ngc-state", daemon=True).start()
         logger.info("starting %d controller worker(s)", len(entries))
         for entry in entries:
+            pair_group = None
+            if entry.pair_role:
+                pair_group = self.pair_groups.get(entry.player)
+                if pair_group is None:
+                    pair_group = _PairGroup(entry.player, self.dsu, on_topology_change=self._schedule_reorder)
+                    self.pair_groups[entry.player] = pair_group
             worker = _Worker(
                 entry,
                 self.config,
@@ -776,6 +934,7 @@ class Bridge:
                 self.hub,
                 dsu=self.dsu,
                 on_topology_change=self._schedule_reorder,
+                pair_group=pair_group,
             )
             self.workers.append(worker)
             threading.Thread(target=worker.run, name=f"ctrl-{entry.player}", daemon=True).start()
@@ -788,6 +947,8 @@ class Bridge:
                 self._reorder_timer.cancel()
         for worker in self.workers:
             worker.cleanup()
+        for pair_group in self.pair_groups.values():
+            pair_group.close()
         if self.dsu is not None:
             self.dsu.stop()
         if self.hub._executor is not None:
