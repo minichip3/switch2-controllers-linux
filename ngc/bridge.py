@@ -93,11 +93,11 @@ _BTMGMT_LOCK = threading.Lock()
 _LAST_BT_INQUIRY_OFF = 0.0
 _BT_INQUIRY_OFF_MIN_INTERVAL_S = 0.35
 
-# Consecutive failed reconnect passes for a pad that previously connected
-# before we power-cycle the adapter (see _power_cycle_adapter). Each pass is
-# _CONNECT_ATTEMPTS x _CONNECT_ATTEMPT_S ~ 7s, so this fires after ~15s of
-# continuous failure, matching the "only a power cycle clears it" symptom
-# observed on real hardware.
+# Consecutive failed connect passes for a pad -- whether or not it has ever
+# connected in this process -- before we power-cycle the adapter (see
+# _power_cycle_adapter). Each pass is _CONNECT_ATTEMPTS x _CONNECT_ATTEMPT_S
+# ~ 7s, so this fires after ~15s of continuous failure, matching the "only
+# a power cycle clears it" symptom observed on real hardware.
 _RECONNECT_FAILURES_BEFORE_POWER_CYCLE = 2
 
 
@@ -425,32 +425,40 @@ class _ConnectHub:
                         else:
                             logger.info("connect to %s (%s) failed (%s)", mac, mode, detail)
                             _force_bt_inquiry_off(force=True)
-                            if worker.ever_connected:
-                                worker.reconnect_failures += 1
-                                if (
-                                    worker.reconnect_failures
-                                    >= _RECONNECT_FAILURES_BEFORE_POWER_CYCLE
-                                    and not any(
-                                        w.is_connected()
-                                        for w in hub.workers_by_mac.values()
-                                    )
-                                ):
-                                    logger.warning(
-                                        "reconnects failing repeatedly with nothing left connected; "
-                                        "power-cycling adapter to clear wedged radio state"
-                                    )
-                                    _power_cycle_adapter()
-                                    for w in hub.workers_by_mac.values():
-                                        w.reconnect_failures = 0
-                                    hub._last_seen.clear()
-                                    hub._logged.clear()
-                                    # Adapter needs a moment to re-init;
-                                    # bail out of this pass -- the scan
-                                    # loop will re-see the pads on their
-                                    # next advertisement. Also avoids the
-                                    # KeyError the cleared _last_seen would
-                                    # cause on the next pending mac.
-                                    break
+                            # Not gated on worker.ever_connected -- a radio
+                            # that's wedged before this process ever
+                            # connected anything needs the same recovery a
+                            # wedged-after-reconnecting one does. Confirmed
+                            # on real hardware: right after a service
+                            # restart, repeated first-ever-connect failures
+                            # never triggered this (ever_connected was still
+                            # False for every worker), so nothing broke the
+                            # loop except a manual Bluetooth power cycle.
+                            worker.reconnect_failures += 1
+                            if (
+                                worker.reconnect_failures
+                                >= _RECONNECT_FAILURES_BEFORE_POWER_CYCLE
+                                and not any(
+                                    w.is_connected()
+                                    for w in hub.workers_by_mac.values()
+                                )
+                            ):
+                                logger.warning(
+                                    "reconnects failing repeatedly with nothing left connected; "
+                                    "power-cycling adapter to clear wedged radio state"
+                                )
+                                _power_cycle_adapter()
+                                for w in hub.workers_by_mac.values():
+                                    w.reconnect_failures = 0
+                                hub._last_seen.clear()
+                                hub._logged.clear()
+                                # Adapter needs a moment to re-init;
+                                # bail out of this pass -- the scan
+                                # loop will re-see the pads on their
+                                # next advertisement. Also avoids the
+                                # KeyError the cleared _last_seen would
+                                # cause on the next pending mac.
+                                break
 
                 for mac, (seen_at, _) in list(hub._last_seen.items()):
                     if now - seen_at > seen_ttl_s:
