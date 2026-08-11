@@ -221,10 +221,20 @@ def _bluez_remove_device(mac: str) -> None:
     Do not call this while *we* already own a live session for ``mac`` — BlueZ
     treating the ACL as its own Connected device means RemoveDevice tears the
     link down.
+
+    Real-hardware finding (this investigation): a fresh reboot connects
+    instantly on the first pairing advert every time; the slow, flaky
+    connect-timeout pattern only starts appearing *after* the first
+    connect-then-disconnect cycle -- i.e. after this function has run once.
+    ``bluetoothctl remove`` and the ``busctl RemoveDevice`` call below both
+    end up invoking the same underlying D-Bus Adapter1.RemoveDevice method,
+    so doing both was pure redundancy; dropping the CLI one (spawns a
+    whole ``bluetoothctl`` process, which does more session/agent setup
+    than the raw D-Bus call) to see whether that redundant traffic is what
+    was nudging bluetoothd into its own background BR/EDR discovery loop.
     """
     if not mac:
         return
-    _run_quiet(["bluetoothctl", "remove", mac], timeout=2.0)
     path = f"/org/bluez/hci{_adapter_index()}/dev_{mac.upper().replace(':', '_')}"
     _run_quiet(
         ["busctl", "call", "org.bluez", f"/org/bluez/hci{_adapter_index()}",
