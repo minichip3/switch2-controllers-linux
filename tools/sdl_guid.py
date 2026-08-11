@@ -282,48 +282,52 @@ def fix_joycon2_right_mapping(mapping: str) -> str:
 
 
 # Combined left+right Joy-Con 2 pair (bridge.py _PairGroup, virtual PID
-# JOYCON2_PAIR_PID). Same kernel hid-nintendo face convention as the solo
-# halves: A=EAST, B=SOUTH, X=NORTH, Y=WEST -- which is also position-agnostic
-# (EAST = the button on the right of the diamond, etc.), so SDL's standard
-# a/b/x/y position semantics map onto it directly. Buttons are enumerated in
-# evdev code order as always: b0=SOUTH(B) b1=EAST(A) b2=NORTH(X) b3=WEST(Y)
-# b4=L(TL) b5=R(TR) b6=ZL(TL2) b7=ZR(TR2) b8=MINUS(SELECT) b9=PLUS(START)
-# b10=HOME(MODE) b11=L-stick-click(THUMBL) b12=R-stick-click(THUMBR)
-# b13-16=D-pad up/down/left/right (plain buttons, no hat -- see
-# JOYCON2_PAIR_BUTTON_MAP).
+# JOYCON2_PAIR_PID). This is 미니's own hand-tuned layout from Steam's
+# personalization UI -- same deal as the solo halves (Steam special-cases
+# the Nintendo vendor and ignores gamecontrollerdb for it, so this DB line
+# serves SDL-based emulators / non-Steam SDL consumers while Steam keeps
+# using the personalization cached in its configset_57e-2068-*.vdf),
+# captured verbatim so `--write` reproduces exactly what Steam shows for
+# this device:
+#   a:b0 b:b1 y:b2 x:b3 = face buttons by position (Nintendo diamond),
+#   misc1:b4 = CAPTURE slot, leftshoulder:b5 L, rightshoulder:b6 R,
+#   lefttrigger:b7 ZL, righttrigger:b8 ZR, back:b9 MINUS, start:b10 PLUS,
+#   guide:b11 HOME, leftstick:b12 rightstick:b13, dpup/down/left/right
+#   b14-b17, leftx:a1~ lefty:a0 (primary axes swapped + inverted, same
+#   pattern as the solo Right half), rightx:a2 righty:a3.
 #
-# Sticks: both halves are in their standard (grip) orientation and the pad
-# already emits left stick on ABS_X/Y and right stick on ABS_RX/RY with the
-# same correction solo mode uses, so the axes need no swap here (unlike the
-# solo Right half's line above). CAPTURE is deliberately absent: it shares
-# evdev code 0x136 with ZL (BTN_TL2/BTN_Z are the same key), and ZL matters
-# more to games; bind capture manually in Steam if needed.
-NGC_JOYCON2_PAIR_BUTTONS = (
-    "a:b0",
+# Note the b indices are one higher than the evdev code-order count in
+# ngc/gamepad.py (18 slots b0-b17 here vs 17 declared buttons) -- Steam
+# enumerates this device with one extra button slot (b4, which lands in
+# misc1). Reproduced verbatim rather than "corrected": this is what Steam
+# actually verified against, same as the solo halves' lines.
+NGC_JOYCON2_PAIR_TOKENS = (
+    "crc:c569",
+    "platform:Linux",
     "b:b1",
-    "x:b2",
-    "y:b3",
-    "leftshoulder:b4",
-    "rightshoulder:b5",
-    "lefttrigger:b6",
-    "righttrigger:b7",
-    "back:b8",
-    "start:b9",
-    "guide:b10",
-    "leftstick:b11",
-    "rightstick:b12",
-    "dpup:b13",
-    "dpdown:b14",
-    "dpleft:b15",
-    "dpright:b16",
-)
-
-NGC_JOYCON2_PAIR_AXES = (
-    "leftx:a0",
-    "lefty:a1",
+    "a:b0",
+    "y:b2",
+    "x:b3",
+    "dpleft:b16",
+    "dpright:b17",
+    "dpup:b14",
+    "dpdown:b15",
+    "leftx:a1~",
+    "lefty:a0",
+    "leftstick:b12",
     "rightx:a2",
     "righty:a3",
-    "platform:Linux",
+    "rightstick:b13",
+    "leftshoulder:b5",
+    "lefttrigger:b7",
+    "rightshoulder:b6",
+    "righttrigger:b8",
+    "back:b9",
+    "start:b10",
+    "guide:b11",
+    "misc1:b4",
+    "hint:!SDL_GAMECONTROLLER_USE_BUTTON_LABELS:=1",
+    "steam:2",
 )
 
 
@@ -333,7 +337,7 @@ def fix_joycon2_pair_mapping(mapping: str) -> str:
     if len(parts) < 2:
         return mapping
     guid, name = parts[0], parts[1]
-    return ",".join([guid, name, *NGC_JOYCON2_PAIR_BUTTONS, *NGC_JOYCON2_PAIR_AXES])
+    return ",".join([guid, name, *NGC_JOYCON2_PAIR_TOKENS])
 
 
 def mapping_for_pad(name: str, mapping: str | None) -> str | None:
