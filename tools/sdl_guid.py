@@ -281,12 +281,69 @@ def fix_joycon2_right_mapping(mapping: str) -> str:
     return ",".join([guid, name, *NGC_JOYCON2_RIGHT_BUTTONS, *NGC_JOYCON2_RIGHT_AXES])
 
 
+# Combined left+right Joy-Con 2 pair (bridge.py _PairGroup, virtual PID
+# JOYCON2_PAIR_PID). Same kernel hid-nintendo face convention as the solo
+# halves: A=EAST, B=SOUTH, X=NORTH, Y=WEST -- which is also position-agnostic
+# (EAST = the button on the right of the diamond, etc.), so SDL's standard
+# a/b/x/y position semantics map onto it directly. Buttons are enumerated in
+# evdev code order as always: b0=SOUTH(B) b1=EAST(A) b2=NORTH(X) b3=WEST(Y)
+# b4=L(TL) b5=R(TR) b6=ZL(TL2) b7=ZR(TR2) b8=MINUS(SELECT) b9=PLUS(START)
+# b10=HOME(MODE) b11=L-stick-click(THUMBL) b12=R-stick-click(THUMBR)
+# b13-16=D-pad up/down/left/right (plain buttons, no hat -- see
+# JOYCON2_PAIR_BUTTON_MAP).
+#
+# Sticks: both halves are in their standard (grip) orientation and the pad
+# already emits left stick on ABS_X/Y and right stick on ABS_RX/RY with the
+# same correction solo mode uses, so the axes need no swap here (unlike the
+# solo Right half's line above). CAPTURE is deliberately absent: it shares
+# evdev code 0x136 with ZL (BTN_TL2/BTN_Z are the same key), and ZL matters
+# more to games; bind capture manually in Steam if needed.
+NGC_JOYCON2_PAIR_BUTTONS = (
+    "a:b0",
+    "b:b1",
+    "x:b2",
+    "y:b3",
+    "leftshoulder:b4",
+    "rightshoulder:b5",
+    "lefttrigger:b6",
+    "righttrigger:b7",
+    "back:b8",
+    "start:b9",
+    "guide:b10",
+    "leftstick:b11",
+    "rightstick:b12",
+    "dpup:b13",
+    "dpdown:b14",
+    "dpleft:b15",
+    "dpright:b16",
+)
+
+NGC_JOYCON2_PAIR_AXES = (
+    "leftx:a0",
+    "lefty:a1",
+    "rightx:a2",
+    "righty:a3",
+    "platform:Linux",
+)
+
+
+def fix_joycon2_pair_mapping(mapping: str) -> str:
+    """Build a complete gamecontrollerdb line for the combined Joy-Con 2 pair pad."""
+    parts = mapping.split(",")
+    if len(parts) < 2:
+        return mapping
+    guid, name = parts[0], parts[1]
+    return ",".join([guid, name, *NGC_JOYCON2_PAIR_BUTTONS, *NGC_JOYCON2_PAIR_AXES])
+
+
 def mapping_for_pad(name: str, mapping: str | None) -> str | None:
     if not mapping:
         return None
     lname = name.lower()
     if "gamecube" in lname:
         return fix_gamecube_mapping(mapping)
+    if "joy-con 2 (pair)" in lname:
+        return fix_joycon2_pair_mapping(mapping)
     if "joy-con 2 (left)" in lname:
         return fix_joycon2_left_mapping(mapping)
     if "joy-con 2 (right)" in lname:
