@@ -115,8 +115,8 @@ if [ -f "$LED_PERMS_SRC" ]; then
   fi
 fi
 
-# 9) udev: IMU uaccess + writable player LEDs
-for rule in 70-ngc-imu-uaccess.rules 71-controller-player-leds-uaccess.rules; do
+# 9) udev: IMU uaccess + writable player LEDs + solo-pad joystick tagging
+for rule in 70-ngc-imu-uaccess.rules 71-controller-player-leds-uaccess.rules 72-ngc-joystick.rules; do
   src="$SYS/udev/$rule"
   dst="/etc/udev/rules.d/$rule"
   [ -f "$src" ] || continue

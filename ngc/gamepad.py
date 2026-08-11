@@ -137,19 +137,6 @@ class SwitchGamepad:
     # the hat capability nor the hardcoded hat emission in update()/
     # release_all() below.
     _DPAD_AS_BUTTONS = {P.JOYCON2_LEFT_PID}
-    # SDL's evdev joystick classifier (SDL_EVDEV_GuessDeviceClass) only sets
-    # ID_INPUT_JOYSTICK if, besides ABS_X/Y, the device has BTN_TRIGGER,
-    # BTN_A, BTN_1, or one of a handful of ABS axes (RX/RY/RZ/throttle/
-    # rudder/wheel/gas/brake) -- everything solo Left Joy-Con deliberately
-    # doesn't declare (see _HAS_RIGHT_STICK/_HAS_TRIGGER_AXES above). Without
-    # one of those, the device is invisible to SDL_NumJoysticks() (Steam,
-    # sdl_guid.py) even though it's a perfectly normal evdev device -- which
-    # is exactly what Dolphin's own evdev backend, not going through SDL's
-    # joystick classifier, was reading fine. BTN_TRIGGER is declared but
-    # never actually emitted (solo Joy-Con has no such button) purely to
-    # satisfy this check, chosen over BTN_A so a binding UI doesn't show it
-    # as a stuck-at-0 face button.
-    _NEEDS_SDL_JOYSTICK_HINT = {P.JOYCON2_LEFT_PID}
 
     def __init__(
         self,
@@ -159,10 +146,7 @@ class SwitchGamepad:
         mac: str = "",
     ):
         self.button_map = button_map or DEFAULT_BUTTON_MAP
-        keys = set(self.button_map.values())
-        if product in self._NEEDS_SDL_JOYSTICK_HINT:
-            keys.add(e.BTN_TRIGGER)
-        keys = sorted(keys)
+        keys = sorted(set(self.button_map.values()))
 
         self._has_right_stick = product in self._HAS_RIGHT_STICK
         self._has_trigger_axes = product in self._HAS_TRIGGER_AXES
