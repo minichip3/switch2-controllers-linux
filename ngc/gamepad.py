@@ -137,6 +137,25 @@ class SwitchGamepad:
     # the hat capability nor the hardcoded hat emission in update()/
     # release_all() below.
     _DPAD_AS_BUTTONS = {P.JOYCON2_LEFT_PID}
+    # SDL's evdev joystick classifier (SDL_EVDEV_GuessDeviceClass, checked
+    # against actual SDL source) only sets ID_INPUT_JOYSTICK if, besides
+    # ABS_X/Y, the device has BTN_TRIGGER, BTN_A, BTN_1, or one of a handful
+    # of ABS axes (RX/RY/RZ/throttle/rudder/wheel/gas/brake) -- everything
+    # solo Left Joy-Con deliberately doesn't declare. A udev rule tagging
+    # ID_INPUT_JOYSTICK directly (system/udev/72-ngc-joystick.rules) was
+    # tried first instead of a dead capability here, on the theory that real
+    # Joy-Cons never hit this classifier at all (they're recognized through
+    # SDL's HIDAPI driver via raw VID/PID over hidraw, a completely
+    # different path we can't reach from a uinput device) -- but that alone
+    # didn't fix it on real hardware (Steam sandboxing/udev-database access
+    # is the likely reason: this classifier is a *process-local* ioctl bit
+    # check SDL does itself, not dependent on being able to read udev's
+    # database at all, so it's the more reliable fix regardless of what
+    # environment Steam is running in). BTN_TRIGGER is declared but never
+    # actually emitted (solo Joy-Con has no such button) purely to satisfy
+    # this check, chosen over BTN_A so a binding UI doesn't show it as a
+    # stuck-at-0 face button.
+    _NEEDS_SDL_JOYSTICK_HINT = {P.JOYCON2_LEFT_PID}
 
     def __init__(
         self,
@@ -146,7 +165,10 @@ class SwitchGamepad:
         mac: str = "",
     ):
         self.button_map = button_map or DEFAULT_BUTTON_MAP
-        keys = sorted(set(self.button_map.values()))
+        keys = set(self.button_map.values())
+        if product in self._NEEDS_SDL_JOYSTICK_HINT:
+            keys.add(e.BTN_TRIGGER)
+        keys = sorted(keys)
 
         self._has_right_stick = product in self._HAS_RIGHT_STICK
         self._has_trigger_axes = product in self._HAS_TRIGGER_AXES
