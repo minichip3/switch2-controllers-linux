@@ -82,6 +82,26 @@ GAMECUBE_BUTTON_MAP = {
     "R_STK": e.BTN_THUMBR,
 }
 
+# Solo Joy-Con 2 (Left), used standalone rather than snapped to a grip or
+# paired with its other half. Physically has no A/B/X/Y, right stick, PLUS,
+# HOME, or analog triggers -- those live on the Right half or the grip --
+# so this deliberately only covers what the Left half actually has, instead
+# of reusing PRO_BUTTON_MAP (which declared all of those as dead
+# capabilities and had no slot at all for SL/SR). Slot choices (SL/SR on the
+# shoulder codes, MINUS on START, CAPTURE on the guide code) come from SDL's
+# own solo/"mini controller" handling (`HandleMiniControllerStateL`, Valve's
+# SDL contribution) rather than guesswork -- confirmed there against the
+# joyfusion project's identical solo Joy-Con 2 support.
+JOYCON2_LEFT_BUTTON_MAP = {
+    "SL_L": e.BTN_TL,
+    "SR_L": e.BTN_TR,
+    "L": e.BTN_TL2,
+    "ZL": e.BTN_TR2,
+    "MINUS": e.BTN_START,
+    "CAPTURE": e.BTN_MODE,
+    "L_STK": e.BTN_THUMBL,
+}
+
 DEFAULT_BUTTON_MAP = PRO_BUTTON_MAP
 
 
@@ -89,10 +109,18 @@ def button_map_for_product(product_id: int) -> dict:
     """Return the default evdev map for a Switch 2 controller PID."""
     if product_id == P.NSO_GAMECUBE_PID:
         return GAMECUBE_BUTTON_MAP
+    if product_id == P.JOYCON2_LEFT_PID:
+        return JOYCON2_LEFT_BUTTON_MAP
     return PRO_BUTTON_MAP
 
 
-class SwitchGamepad:
+    # Only the products in this set have a physical right stick / analog
+    # trigger pair -- everything else (a solo Joy-Con half) declaring those
+    # axes anyway just shows up as a permanently-centered phantom stick and
+    # dead trigger axes in Dolphin/Steam's device inspector.
+    _HAS_RIGHT_STICK = {P.PRO_CONTROLLER2_PID, P.NSO_GAMECUBE_PID, P.JOYCON2_RIGHT_PID}
+    _HAS_TRIGGER_AXES = {P.NSO_GAMECUBE_PID}  # only the GC pad has true analog L/R
+
     def __init__(
         self,
         name: str = "NSO GameCube Controller",
@@ -103,18 +131,36 @@ class SwitchGamepad:
         self.button_map = button_map or DEFAULT_BUTTON_MAP
         keys = sorted(set(self.button_map.values()))
 
-        capabilities = {
-            e.EV_KEY: keys,
-            e.EV_ABS: [
-                (e.ABS_X, AbsInfo(0, STICK_MIN, STICK_MAX, 0, 0, 0)),
-                (e.ABS_Y, AbsInfo(0, STICK_MIN, STICK_MAX, 0, 0, 0)),
+        self._has_right_stick = product in self._HAS_RIGHT_STICK
+        self._has_trigger_axes = product in self._HAS_TRIGGER_AXES
+        # The Left Joy-Con's stick reports its raw axes rotated 90 degrees
+        # clockwise from what a standalone stick should read (pushing left
+        # registered as up) -- confirmed on real hardware. Rotating the
+        # input 90 degrees counter-clockwise before scaling, (x, y) -> (-y, x),
+        # cancels it out. Not needed solo-Right or paired, where the stick
+        # reads correctly already.
+        self._rotate_left_stick_ccw90 = product == P.JOYCON2_LEFT_PID
+
+        abs_axes = [
+            (e.ABS_X, AbsInfo(0, STICK_MIN, STICK_MAX, 0, 0, 0)),
+            (e.ABS_Y, AbsInfo(0, STICK_MIN, STICK_MAX, 0, 0, 0)),
+            (e.ABS_HAT0X, AbsInfo(0, -1, 1, 0, 0, 0)),
+            (e.ABS_HAT0Y, AbsInfo(0, -1, 1, 0, 0, 0)),
+        ]
+        if self._has_right_stick:
+            abs_axes += [
                 (e.ABS_RX, AbsInfo(0, STICK_MIN, STICK_MAX, 0, 0, 0)),
                 (e.ABS_RY, AbsInfo(0, STICK_MIN, STICK_MAX, 0, 0, 0)),
+            ]
+        if self._has_trigger_axes:
+            abs_axes += [
                 (e.ABS_Z, AbsInfo(0, TRIGGER_MIN, TRIGGER_MAX, 0, 0, 0)),
                 (e.ABS_RZ, AbsInfo(0, TRIGGER_MIN, TRIGGER_MAX, 0, 0, 0)),
-                (e.ABS_HAT0X, AbsInfo(0, -1, 1, 0, 0, 0)),
-                (e.ABS_HAT0Y, AbsInfo(0, -1, 1, 0, 0, 0)),
-            ],
+            ]
+
+        capabilities = {
+            e.EV_KEY: keys,
+            e.EV_ABS: abs_axes,
             e.EV_FF: [e.FF_RUMBLE, e.FF_PERIODIC, e.FF_CONSTANT, e.FF_GAIN],
         }
 
@@ -187,12 +233,17 @@ class SwitchGamepad:
         changed |= self._emit_abs(e.ABS_HAT0X, dpad_x)
         changed |= self._emit_abs(e.ABS_HAT0Y, dpad_y)
 
-        changed |= self._emit_abs(e.ABS_X, self._scale_stick(left_stick[0]))
-        changed |= self._emit_abs(e.ABS_Y, -self._scale_stick(left_stick[1]))
-        changed |= self._emit_abs(e.ABS_RX, self._scale_stick(right_stick[0]))
-        changed |= self._emit_abs(e.ABS_RY, -self._scale_stick(right_stick[1]))
-        changed |= self._emit_abs(e.ABS_Z, max(0, min(255, left_trigger)))
-        changed |= self._emit_abs(e.ABS_RZ, max(0, min(255, right_trigger)))
+        lx, ly = left_stick
+        if self._rotate_left_stick_ccw90:
+            lx, ly = -ly, lx
+        changed |= self._emit_abs(e.ABS_X, self._scale_stick(lx))
+        changed |= self._emit_abs(e.ABS_Y, -self._scale_stick(ly))
+        if self._has_right_stick:
+            changed |= self._emit_abs(e.ABS_RX, self._scale_stick(right_stick[0]))
+            changed |= self._emit_abs(e.ABS_RY, -self._scale_stick(right_stick[1]))
+        if self._has_trigger_axes:
+            changed |= self._emit_abs(e.ABS_Z, max(0, min(255, left_trigger)))
+            changed |= self._emit_abs(e.ABS_RZ, max(0, min(255, right_trigger)))
 
         if changed:
             self.ui.syn()
@@ -201,16 +252,12 @@ class SwitchGamepad:
         changed = False
         for code in list(self._last_keys):
             changed |= self._emit_key(code, 0)
-        for code, neutral in (
-            (e.ABS_X, 0),
-            (e.ABS_Y, 0),
-            (e.ABS_RX, 0),
-            (e.ABS_RY, 0),
-            (e.ABS_Z, 0),
-            (e.ABS_RZ, 0),
-            (e.ABS_HAT0X, 0),
-            (e.ABS_HAT0Y, 0),
-        ):
+        neutral_axes = [(e.ABS_X, 0), (e.ABS_Y, 0), (e.ABS_HAT0X, 0), (e.ABS_HAT0Y, 0)]
+        if self._has_right_stick:
+            neutral_axes += [(e.ABS_RX, 0), (e.ABS_RY, 0)]
+        if self._has_trigger_axes:
+            neutral_axes += [(e.ABS_Z, 0), (e.ABS_RZ, 0)]
+        for code, neutral in neutral_axes:
             changed |= self._emit_abs(code, neutral)
         if changed:
             self.ui.syn()
