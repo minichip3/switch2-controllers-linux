@@ -282,32 +282,39 @@ def fix_joycon2_right_mapping(mapping: str) -> str:
 
 
 # Combined left+right Joy-Con 2 pair (bridge.py _PairGroup, virtual PID
-# JOYCON2_PAIR_PID). This is 미니's own hand-tuned layout from Steam's
-# personalization UI -- same deal as the solo halves (Steam special-cases
-# the Nintendo vendor and ignores gamecontrollerdb for it, so this DB line
-# serves SDL-based emulators / non-Steam SDL consumers while Steam keeps
-# using the personalization cached in its configset_57e-2068-*.vdf),
-# captured verbatim so `--write` reproduces exactly what Steam shows for
-# this device:
-#   a:b0 b:b1 y:b2 x:b3 = face buttons by position (Nintendo diamond),
-#   misc1:b4 = CAPTURE slot, leftshoulder:b5 L, rightshoulder:b6 R,
-#   lefttrigger:b7 ZL, righttrigger:b8 ZR, back:b9 MINUS, start:b10 PLUS,
-#   guide:b11 HOME, leftstick:b12 rightstick:b13, dpup/down/left/right
-#   b14-b17, leftx:a1~ lefty:a0 (primary axes swapped + inverted, same
-#   pattern as the solo Right half), rightx:a2 righty:a3.
+# JOYCON2_PAIR_PID). The pair's uinput declares 18 *unique* button codes
+# (CAPTURE is BTN_Z=0x135, a different code from ZL's BTN_TL2=0x138 --
+# unlike the solo Left half, where CAPTURE and ZL share the device, this
+# map has no shared codes), so SDL enumerates exactly b0..b17 in evdev
+# code order:
+#   b0=SOUTH(B) b1=EAST(A) b2=NORTH(X) b3=WEST(Y) b4=BTN_Z(CAPTURE)
+#   b5=TL(L) b6=TR(R) b7=TL2(ZL) b8=TR2(ZR) b9=SELECT(MINUS)
+#   b10=START(PLUS) b11=MODE(HOME) b12=THUMBL b13=THUMBR b14-17=D-pad.
+# (BTN_C=0x132 sits between EAST and NORTH in the gamepad block, which is
+# why the face buttons land at b0-b3 and CAPTURE at b4 rather than the
+# naive 0x130-offset numbering.)
 #
-# Note the b indices are one higher than the evdev code-order count in
-# ngc/gamepad.py (18 slots b0-b17 here vs 17 declared buttons) -- Steam
-# enumerates this device with one extra button slot (b4, which lands in
-# misc1). Reproduced verbatim rather than "corrected": this is what Steam
-# actually verified against, same as the solo halves' lines.
+# 미니 hand-tuned this layout in Steam's personalization UI (Steam
+# special-cases the Nintendo vendor and ignores gamecontrollerdb for it, so
+# this DB line serves SDL-based emulators / non-Steam SDL consumers while
+# Steam keeps the personalization cached in its configset_57e-2068-*.vdf).
+# Steam's own line stores the face buttons by *position* (a:b0 b:b1 y:b2
+# x:b3) -- correct there because Steam Input reinterprets the x/y slots by
+# physical label under its Nintendo button layout. SDL does no such
+# reinterpretation, so the SDL consumer line below maps face buttons by
+# physical label instead (a:b1 b:b0 x:b2 y:b3) and forces label mode via
+# the hint. Everything from b4 on (misc1=CAPTURE, shoulders, triggers,
+# sticks, D-pad) matches Steam's line verbatim -- those are plain
+# code-order indices on both sides.
+#
+# Axes: leftx:a1~ lefty:a0 (primary axes swapped + one inverted, same
+# pattern as the solo Right half), rightx:a2 righty:a3.
 NGC_JOYCON2_PAIR_TOKENS = (
-    "crc:c569",
     "platform:Linux",
-    "b:b1",
-    "a:b0",
-    "y:b2",
-    "x:b3",
+    "a:b1",
+    "b:b0",
+    "x:b2",
+    "y:b3",
     "dpleft:b16",
     "dpright:b17",
     "dpup:b14",
@@ -326,8 +333,7 @@ NGC_JOYCON2_PAIR_TOKENS = (
     "start:b10",
     "guide:b11",
     "misc1:b4",
-    "hint:!SDL_GAMECONTROLLER_USE_BUTTON_LABELS:=1",
-    "steam:2",
+    "hint:SDL_GAMECONTROLLER_USE_BUTTON_LABELS:=1",
 )
 
 
