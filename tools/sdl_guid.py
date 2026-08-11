@@ -186,22 +186,29 @@ def fix_gamecube_mapping(mapping: str) -> str:
 # b5=SR(BTN_TR2) b6=MINUS(BTN_SELECT) b7=stick-click(BTN_THUMBL)
 # b8-11=D-pad up/down/left/right (BTN_DPAD_*, plain buttons -- not a hat;
 # nothing here declares Hat0X/Y).
-# CAPTURE goes to misc1, not guide -- guide has special significance to Steam
-# (opens the overlay / hijacks input), which is exactly what CAPTURE landing
-# on BTN_MODE caused before this device switched to BTN_Z. b0 (BTN_A) has
-# no semantic slot here -- it's never actually pressed.
+#
+# This is 미니's own hand-tuned layout from Steam's personalization UI
+# (auto-detection never worked reliably for this device -- see this
+# project's history), captured here so `--write` reproduces it instead of
+# a guess:
+#   guide=CAPTURE, leftshoulder=SL, rightshoulder=SR, start=MINUS,
+#   leftstick=stick-click, x=D-pad-up, b=D-pad-down, a=D-pad-left,
+#   y=D-pad-right.
+# L (b2) and ZL (b4) are deliberately left unbound -- awkward to reach
+# holding a single Joy-Con sideways, rarely used solo. guide=CAPTURE
+# specifically was flagged as a past mouse-hijack risk (see the CAPTURE
+# comment on JOYCON2_LEFT_BUTTON_MAP in ngc/gamepad.py, from when it sat
+# on BTN_MODE) but confirmed fine here, holding solo.
 NGC_JOYCON2_LEFT_BUTTONS = (
-    "misc1:b1",
-    "leftshoulder:b2",
-    "rightshoulder:b3",
-    "lefttrigger:b4",
-    "righttrigger:b5",
-    "back:b6",
+    "guide:b1",
+    "leftshoulder:b3",
+    "rightshoulder:b5",
+    "start:b6",
     "leftstick:b7",
-    "dpup:b8",
-    "dpdown:b9",
-    "dpleft:b10",
-    "dpright:b11",
+    "x:b8",
+    "b:b9",
+    "a:b10",
+    "y:b11",
 )
 
 NGC_JOYCON2_LEFT_AXES = (
