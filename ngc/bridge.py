@@ -114,26 +114,54 @@ def _run_quiet(cmd: list[str], *, timeout: float = 2.0) -> None:
         pass
 
 
+def _stop_find(idx: str, discovery_type: str) -> None:
+    """Run one ``btmgmt stop-find`` for a given discovery type. Never raises
+    -- a hung btmgmt must not crash the bridge, and an invalid-parameters
+    reply (the discovery type wasn't the active one) is a harmless no-op."""
+    try:
+        proc = subprocess.Popen(
+            ["sudo", "-n", "btmgmt", "-i", idx, "stop-find", discovery_type],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            proc.wait(timeout=1.5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.wait(timeout=0.5)
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _force_bt_inquiry_off(*, force: bool = False) -> None:
-    """HCI-level BR/EDR Inquiry stop.
+    """HCI-level BR/EDR Inquiry *and* LE scan stop.
 
     Real-hardware root cause (same host, sibling joyfusion project's btmon
-    investigation): the interference that blocks raw L2CAP connect here was
-    never an *LE* scan despite this function's old name and old ``-l`` flag
-    -- bluetoothd (or something upstream; every external client candidate
-    was ruled out there) restarts ordinary BR/EDR ``Inquiry`` back-to-back,
-    a fresh one firing within ~1s of the previous ``Inquiry Complete``.
-    ``btmgmt stop-find -l`` against BR/EDR discovery returns "Invalid
-    Parameters" instantly (a type mismatch), which is exactly why the old
-    flag silently never helped. ``-b`` actually stops it (``Discovering``
-    flips to ``no``), just not for long, so callers keep re-calling this
-    around connect attempts (see _connect_sync).
+    investigation): bluetoothd (or something upstream; every external
+    client candidate was ruled out there) restarts ordinary BR/EDR
+    ``Inquiry`` back-to-back, a fresh one firing within ~1s of the previous
+    ``Inquiry Complete``. ``-b`` stops that (``Discovering`` flips to
+    ``no``), just not for long, so callers keep re-calling this around
+    connect attempts (see _connect_sync).
+
+    Also runs ``-l`` (LE scan) for the same reason, added after "wake"-mode
+    reconnects kept failing with zero ``LE Create Connection`` ever showing
+    up in a btmon capture across multiple full attempts -- a controller
+    can't issue that while it's still LE scanning, which -b never touches.
+    This function used to only run -l (its old name/flag), removed when -b
+    turned out to be what BR/EDR Inquiry needed -- but that doesn't mean
+    nothing was ever using LE scan too; -l against a BR/EDR-only discovery
+    session returns "Invalid Parameters" instantly (a harmless no-op), so
+    running both unconditionally is safe either way.
 
     BlueZ's D-Bus ``StopDiscovery`` only ends *our* session; ``btmgmt``
     clears the HCI-level discovery regardless of who started it. Requires
     passwordless ``sudo`` for btmgmt (Bazzite default for this user).
 
-    Never raises — a hung btmgmt must not crash the bridge.
+    Never raises.
     """
     global _LAST_BT_INQUIRY_OFF
     now = time.monotonic()
@@ -142,23 +170,8 @@ def _force_bt_inquiry_off(*, force: bool = False) -> None:
             return
         _LAST_BT_INQUIRY_OFF = now
         idx = _adapter_index()
-        # Start detached-ish: kill hung btmgmt so we never block the hub.
-        try:
-            proc = subprocess.Popen(
-                ["sudo", "-n", "btmgmt", "-i", idx, "stop-find", "-b"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            try:
-                proc.wait(timeout=1.5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                try:
-                    proc.wait(timeout=0.5)
-                except Exception:  # noqa: BLE001
-                    pass
-        except Exception:  # noqa: BLE001
-            pass
+        _stop_find(idx, "-b")
+        _stop_find(idx, "-l")
 
 
 # Tried toggling BR/EDR off for the duration of a connect attempt (to make
