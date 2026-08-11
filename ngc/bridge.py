@@ -54,7 +54,15 @@ _SCAN_SETTLE_S = 0.10
 # pending stalls on the same HCI command queue as that pending connect).
 # Suppressed once before the connect starts and then left alone.
 _CONNECT_ATTEMPT_S = 3.0
-_CONNECT_ATTEMPTS = 4
+# Each dst_type tried costs ~1.5s (HCI-queue tax) + up to _CONNECT_ATTEMPT_S
+# regardless of outcome (see _connect_dst_with_polling), so total budget
+# here is _CONNECT_ATTEMPTS x len(dst_types tried) x ~4.5s. Once a pad's
+# dst_type is known (see _connect_sync's worker.last_dst_type), that's just
+# one type, so 2 attempts is ~9s -- inside the Joy-Con 2's ~10s wake-mode
+# advertising window. The scan loop retries on the pad's next advertisement
+# regardless, so a slower first-ever-pairing pass (unknown dst_type, both
+# tried) isn't fatal, just not expected to finish within one window.
+_CONNECT_ATTEMPTS = 2
 
 
 def _adapter_index() -> str:
@@ -443,11 +451,21 @@ class _ConnectHub:
         adapter = self.config.adapter_mac
         if not adapter:
             return False, "no adapter configured"
+        # Every dst_type tried costs a real ~1.5s HCI-queue tax on top of the
+        # poll wait itself (see _connect_dst_with_polling), regardless of
+        # whether it succeeds -- trying both LE_PUBLIC and LE_RANDOM every
+        # single reconnect roughly doubles that cost for no reason once we
+        # already know which one this pad actually uses. Once we have that
+        # confirmed (worker.last_dst_type), only try it; if every attempt
+        # still fails, clear the hint so the next _connect_sync call (next
+        # scan pass) falls back to trying both again instead of getting
+        # stuck on a hint that stopped being true.
+        dst_types = (worker.last_dst_type,) if worker.last_dst_type is not None else (att.LE_PUBLIC, att.LE_RANDOM)
         with _CONNECT_LOCK:
             last_detail = "no attempts"
             for attempt in range(_CONNECT_ATTEMPTS):
                 ctrl = SwitchController(mac, adapter)
-                for dst in (att.LE_PUBLIC, att.LE_RANDOM):
+                for dst in dst_types:
                     ok, detail = self._connect_dst_with_polling(ctrl, dst)
                     if ok:
                         ctrl.att.dst_type = dst
@@ -459,6 +477,8 @@ class _ConnectHub:
                     last_detail = detail
                 ctrl.close()
                 time.sleep(0.02)
+            if worker.last_dst_type is not None:
+                worker.last_dst_type = None
             return False, last_detail
 
     @staticmethod
@@ -530,6 +550,14 @@ class _Worker:
         # power cycle; drives the adapter power-cycle recovery (see
         # _scan_loop).
         self.reconnect_failures = 0
+        # dst_type (LE_PUBLIC/LE_RANDOM) that last actually worked for this
+        # mac -- each fresh HCI-level connect/cancel on this hardware costs
+        # a real ~1.5s tax regardless of how it's issued (see
+        # _connect_dst_with_polling's doc comment), so trying both address
+        # types on every reconnect roughly doubles how many of those we pay
+        # for no reason once we already know which one this pad uses (see
+        # _connect_sync).
+        self.last_dst_type: Optional[int] = None
 
     def is_connected(self) -> bool:
         return self.controller is not None and self.controller.is_connected
@@ -625,6 +653,7 @@ class _Worker:
                 self.hub.bridge._publish_state()
             self.ever_connected = True
             self.reconnect_failures = 0
+            self.last_dst_type = ctrl.att.dst_type
             return True
         except Exception as exc:  # noqa: BLE001
             logger.error("session setup failed for %s: %s", mac, exc)
