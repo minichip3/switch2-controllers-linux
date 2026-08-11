@@ -2,10 +2,14 @@
 """Print SDL GUIDs + GameController mappings for connected pads, and optionally
 upsert ngc mappings into ~/Applications/gamecontrollerdb.txt.
 
+Needs PySDL2, which is NOT one of the core bridge dependencies (not in
+requirements.txt) -- install it into the project venv first:
+    uv pip install --python .venv312 pysdl2 pysdl2-dll
+
 Run this ON the Bazzite box with the controllers awake/connected:
-    python3 tools/sdl_guid.py            # list pads + GUID + mapping
-    python3 tools/sdl_guid.py --write     # upsert ngc lines in Applications DB
-    python3 tools/sdl_guid.py --restore-dbs  # fix truncated Steam/EmuDeck overrides
+    .venv312/bin/python3 tools/sdl_guid.py            # list pads + GUID + mapping
+    .venv312/bin/python3 tools/sdl_guid.py --write     # upsert ngc lines in Applications DB
+    .venv312/bin/python3 tools/sdl_guid.py --restore-dbs  # fix truncated Steam/EmuDeck overrides
 
 Never write a one-line override into ~/.local/share/Steam/gamecontrollerdb.txt —
 SDL treats that file as the full mapping table and every other controller stops
@@ -166,11 +170,127 @@ def fix_gamecube_mapping(mapping: str) -> str:
     return ",".join([guid, name, *buttons, *axis_tokens])
 
 
+# Solo Left Joy-Con 2, using the kernel hid-nintendo button convention (see
+# ngc/gamepad.py's JOYCON2_LEFT_BUTTON_MAP doc comment). SDL has no built-in
+# template for this button layout, so without an explicit line here it falls
+# back to its generic auto-mapping heuristic -- which guesses wrong for this
+# device (SL/SR land on the d-pad's guessed slots) even though the raw evdev
+# capability set itself (what Dolphin reads directly) is correct. Button
+# indices below are SDL's own enumeration order, which follows the evdev
+# capability declaration order in ngc/gamepad.py -- sorted by evdev code:
+# b0=BTN_A (declared-but-dead, exists only so SDL's joystick classifier
+# recognizes this device at all -- see gamepad.py's
+# _NEEDS_SDL_JOYSTICK_HINT; BTN_A rather than BTN_TRIGGER specifically so
+# it stays in the same evdev code block as everything else here, see that
+# doc comment) b1=CAPTURE(BTN_Z) b2=L(BTN_TL) b3=SL(BTN_TR) b4=ZL(BTN_TL2)
+# b5=SR(BTN_TR2) b6=MINUS(BTN_SELECT) b7=stick-click(BTN_THUMBL)
+# b8-11=D-pad up/down/left/right (BTN_DPAD_*, plain buttons -- not a hat;
+# nothing here declares Hat0X/Y).
+#
+# This is 미니's own hand-tuned layout from Steam's personalization UI
+# (auto-detection never worked reliably for this device -- see this
+# project's history), captured here so `--write` reproduces it instead of
+# a guess:
+#   guide=CAPTURE, leftshoulder=SL, rightshoulder=SR, start=MINUS,
+#   leftstick=stick-click, x=D-pad-up, b=D-pad-down, a=D-pad-left,
+#   y=D-pad-right.
+# L (b2) and ZL (b4) are deliberately left unbound -- awkward to reach
+# holding a single Joy-Con sideways, rarely used solo. guide=CAPTURE
+# specifically was flagged as a past mouse-hijack risk (see the CAPTURE
+# comment on JOYCON2_LEFT_BUTTON_MAP in ngc/gamepad.py, from when it sat
+# on BTN_MODE) but confirmed fine here, holding solo.
+NGC_JOYCON2_LEFT_BUTTONS = (
+    "guide:b1",
+    "leftshoulder:b3",
+    "rightshoulder:b5",
+    "start:b6",
+    "leftstick:b7",
+    "x:b8",
+    "b:b9",
+    "a:b10",
+    "y:b11",
+)
+
+NGC_JOYCON2_LEFT_AXES = (
+    "leftx:a0",
+    "lefty:a1",
+    "platform:Linux",
+)
+
+
+def fix_joycon2_left_mapping(mapping: str) -> str:
+    """Build a complete gamecontrollerdb line for the solo Left Joy-Con 2 pad."""
+    parts = mapping.split(",")
+    if len(parts) < 2:
+        return mapping
+    guid, name = parts[0], parts[1]
+    return ",".join([guid, name, *NGC_JOYCON2_LEFT_BUTTONS, *NGC_JOYCON2_LEFT_AXES])
+
+
+# Solo Right Joy-Con 2, same kernel hid-nintendo convention (see
+# ngc/gamepad.py's JOYCON2_RIGHT_BUTTON_MAP doc comment). SDL enumerates
+# the declared buttons in evdev code order, so b0..b10 here are:
+# b0=BTN_SOUTH(B) b1=BTN_EAST(A) b2=BTN_NORTH(X) b3=BTN_WEST(Y)
+# b4=SL(BTN_TL) b5=R(BTN_TR) b6=SR(BTN_TL2) b7=ZR(BTN_TR2)
+# b8=PLUS(BTN_START) b9=HOME(BTN_MODE) b10=stick-click(BTN_THUMBR).
+#
+# This is 미니's own hand-tuned layout from Steam's personalization UI
+# (same deal as the Left half: Steam special-cases the Nintendo vendor
+# and ignores gamecontrollerdb for it, so this DB line serves SDL-based
+# emulators / non-Steam SDL consumers while Steam keeps using the
+# personalization cached in its configset_57e-2066-*.vdf), captured here
+# so `--write` reproduces it instead of a guess:
+#   guide=HOME, leftshoulder=SL, rightshoulder=SR, start=PLUS,
+#   leftstick=stick-click, a/b/x/y = face buttons as tuned in Steam
+#   (physical A lands on SDL a, physical Y on SDL y, physical B on
+#   SDL x, physical X on SDL b -- the natural rotation of holding the
+#   right half sideways).
+# R (b5) and ZR (b7) deliberately unbound, mirroring the Left half's
+# L/ZL -- awkward to reach solo sideways.
+#
+# Axes: the solo Right Joy-Con's one stick is presented as the primary
+# (ABS_X/Y) stick after device.py's stick-source swap, and the uinput
+# Y axis is emitted negated, so SDL sees the two axes effectively
+# swapped plus one inverted; Steam's tuning compensates with
+# leftx:a1~, lefty:a0.
+NGC_JOYCON2_RIGHT_BUTTONS = (
+    "b:b2",
+    "a:b1",
+    "y:b3",
+    "x:b0",
+    "leftstick:b10",
+    "leftshoulder:b4",
+    "rightshoulder:b6",
+    "start:b8",
+    "guide:b9",
+)
+
+NGC_JOYCON2_RIGHT_AXES = (
+    "leftx:a1~",
+    "lefty:a0",
+    "platform:Linux",
+)
+
+
+def fix_joycon2_right_mapping(mapping: str) -> str:
+    """Build a complete gamecontrollerdb line for the solo Right Joy-Con 2 pad."""
+    parts = mapping.split(",")
+    if len(parts) < 2:
+        return mapping
+    guid, name = parts[0], parts[1]
+    return ",".join([guid, name, *NGC_JOYCON2_RIGHT_BUTTONS, *NGC_JOYCON2_RIGHT_AXES])
+
+
 def mapping_for_pad(name: str, mapping: str | None) -> str | None:
     if not mapping:
         return None
-    if "gamecube" in name.lower():
+    lname = name.lower()
+    if "gamecube" in lname:
         return fix_gamecube_mapping(mapping)
+    if "joy-con 2 (left)" in lname:
+        return fix_joycon2_left_mapping(mapping)
+    if "joy-con 2 (right)" in lname:
+        return fix_joycon2_right_mapping(mapping)
     return mapping
 
 
@@ -258,12 +378,21 @@ def main() -> int:
                 m = sdl2.SDL_GameControllerMapping(gc)
                 mapping = m.decode() if m else None
                 sdl2.SDL_GameControllerClose(gc)
+        is_ngc_pad = any(h in name.lower() for h in NGC_NAME_HINTS)
+        if mapping is None and is_ngc_pad:
+            # SDL_IsGameController() is false until *some* mapping exists
+            # for this GUID -- there's no built-in template for this button
+            # layout, so it never gets one on its own. Our fix_* functions
+            # (fix_joycon2_left_mapping etc.) build the full button/axis
+            # token list themselves from scratch and only need guid+name
+            # from the base line, so a bare synthesized one works fine here.
+            mapping = f"{guid_str},{name},"
         print(f"[{i}] {name}")
         print(f"     GUID: {guid_str}  gamecontroller={is_gc}")
         if mapping:
             mapping = mapping_for_pad(name, mapping)
             print(f"     mapping: {mapping}")
-            if any(h in name.lower() for h in NGC_NAME_HINTS):
+            if is_ngc_pad:
                 mappings.append((name, mapping))
         print()
 

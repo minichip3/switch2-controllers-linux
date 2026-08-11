@@ -1,0 +1,10 @@
+# Force ID_INPUT_JOYSTICK for ngc's virtual pads. udev's own input_id
+# heuristic (and SDL's fallback SDL_EVDEV_GuessDeviceClass, which runs when
+# udev hasn't already set this) both key off a face button (BTN_A/BTN_1),
+# BTN_TRIGGER, or a right-stick/throttle-type ABS axis being present besides
+# ABS_X/Y. Solo Joy-Con halves genuinely have none of those -- a Left half
+# has no A/B/X/Y, no right stick, and ZL is a plain button, not an analog
+# trigger axis -- so without this tag they're invisible to SDL_NumJoysticks()
+# (Steam, tools/sdl_guid.py) even though the device itself is a perfectly
+# normal evdev gamepad and Dolphin's own evdev backend reads it fine.
+SUBSYSTEM=="input", ENV{PHYS}=="ngc/*", ENV{ID_INPUT_JOYSTICK}="1"
