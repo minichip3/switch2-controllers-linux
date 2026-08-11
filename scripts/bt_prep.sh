@@ -14,11 +14,12 @@ bluetoothctl scan off >/dev/null 2>&1 || true
 busctl call org.bluez /org/bluez/hci0 org.bluez.Adapter1 StopDiscovery >/dev/null 2>&1 || true
 
 # Steam owns a permanent discovery session; StopDiscovery can't clear it.
-# btmgmt stop-find -l stops the controller's LE scan at the HCI layer.
-if sudo -n btmgmt -i 0 stop-find -l >/dev/null 2>&1; then
-  echo "HCI LE scan stopped (btmgmt stop-find -l)"
+# btmgmt stop-find -b stops the BR/EDR Inquiry (the real interference -- see
+# ngc/bridge.py _force_bt_inquiry_off) at the HCI layer.
+if sudo -n btmgmt -i 0 stop-find -b >/dev/null 2>&1; then
+  echo "BR/EDR Inquiry stopped (btmgmt stop-find -b)"
 else
-  echo "warn: could not run 'sudo -n btmgmt -i 0 stop-find -l' (needed for reliable S2 connects)" >&2
+  echo "warn: could not run 'sudo -n btmgmt -i 0 stop-find -b' (needed for reliable S2 connects)" >&2
 fi
 
 if [[ -n "$MAC" ]]; then
