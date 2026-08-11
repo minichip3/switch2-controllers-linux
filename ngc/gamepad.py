@@ -113,23 +113,21 @@ JOYCON2_LEFT_BUTTON_MAP = {
     "RIGHT": e.BTN_DPAD_RIGHT,
 }
 
-# Real Nintendo Switch (1) Joy-Con (L) USB product ID. Solo Left Joy-Con
-# advertises this instead of the actual Switch 2 PID (JOYCON2_LEFT_PID,
-# 0x2067 -- a value nothing in SDL/Dolphin/Steam's databases has ever seen)
-# so SDL's and Dolphin's own built-in Joy-Con recognition (semantic button
-# glyphs/labels instead of generic "Button 1/2/3") can kick in. This isn't
-# a cosmetic label trick -- JOYCON2_LEFT_BUTTON_MAP already sends the exact
-# same evdev capability layout the real kernel hid-nintendo driver does for
-# a Joy-Con (L), so posing as one on the wire is accurate, not misleading.
-_REAL_JOYCON1_LEFT_PID = 0x2006
-
-
+# Tried advertising the real Nintendo Switch (1) Joy-Con (L) USB product ID
+# (0x2006) here instead of the actual Switch 2 PID, on the theory that SDL's
+# built-in Joy-Con recognition would kick in for free. Backfired on real
+# hardware: SDL's evdev/joystick backend specifically excludes VID/PIDs it
+# knows have a dedicated HIDAPI driver (SDL_JOYSTICK_HIDAPI_SWITCH covers
+# 0x057e:0x2006) from the generic path entirely, assuming HIDAPI already
+# has it covered -- but HIDAPI enumerates real hidraw nodes, which this
+# uinput device doesn't have, so posing as that PID made the device
+# disappear from SDL completely instead of getting labeled better. Back to
+# the real Switch 2 protocol PID; the explicit gamecontrollerdb line in
+# tools/sdl_guid.py is what actually gets Steam a correct mapping.
 def uinput_product_id(product: int) -> int:
-    """Product ID to advertise over uinput -- may differ from the real
-    BLE/protocol product ID passed everywhere else (see
-    _REAL_JOYCON1_LEFT_PID above)."""
-    if product == P.JOYCON2_LEFT_PID:
-        return _REAL_JOYCON1_LEFT_PID
+    """Product ID to advertise over uinput -- currently always the real
+    BLE/protocol product ID; kept as a seam in case a product ever needs to
+    diverge again."""
     return product
 
 
