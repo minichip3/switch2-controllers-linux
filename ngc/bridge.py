@@ -46,24 +46,29 @@ logger = logging.getLogger(__name__)
 _CONNECT_LOCK = threading.Lock()
 _STATUS_INTERVAL_S = 1.5
 _SCAN_SETTLE_S = 0.10
-# Per-attempt L2CAP connect wait. Originally kept short (0.45s x16, and
+# Total time budget to poll ONE pending connect (one dst_type within one
+# outer attempt) before giving up on it -- see _connect_dst_with_polling.
+# Originally this was a single select() timeout, kept short (0.45s x16, and
 # 0.12s x24 before that) on the assumption that once BR/EDR Inquiry
-# interference is cleared, the actual connect finishes quickly -- but a
-# precise (microsecond) journalctl trace on real hardware during repeated
-# reconnect failures showed each failed attempt costing ~2.46s wall-clock,
-# not the ~0.9s (2 dst types x _CONNECT_ATTEMPT_S) the code alone accounts
-# for. sudo+btmgmt itself measured at ~60ms, ruling that out -- the
-# remaining ~1.5s/attempt lines up with the host's Bluetooth combo chip
-# needing real time to process an LE Create Connection Cancel once select()
-# times out and the socket is closed, before it'll accept the next create-
-# connection request. 16 attempts x ~2.46s real cost was burning ~39s per
-# reconnect pass -- comfortably longer than the Joy-Con 2's ~10s
-# advertising window, so most reconnect attempts likely never got a fair
-# shot at actually completing before the pad stopped advertising. Fewer,
-# longer attempts (same rough time budget) let a connect actually finish
-# instead of getting cancelled just before it would have.
+# interference is cleared, the actual connect finishes quickly. A precise
+# (microsecond) journalctl trace on real hardware during repeated reconnect
+# failures disproved that: each failed attempt cost ~2.46s wall-clock, not
+# the ~0.9s (2 dst types x the old 0.45s) the code alone accounted for --
+# sudo+btmgmt itself measured at ~60ms, ruling that out. Simply raising the
+# single-poll timeout (tried first) made each failed attempt take
+# proportionally longer (~7.55s at 3.0s) without fixing anything, because
+# Inquiry creeps back ~1s after being stopped and a single stop-find at the
+# start of a multi-second wait leaves it free to interfere for the rest of
+# it. _connect_dst_with_polling instead re-suppresses Inquiry every
+# _POLL_SUBINTERVAL_S *without* closing/reopening the socket -- closing a
+# pending connect and starting a new one is what the ~1.5s/attempt
+# (LE Create Connection Cancel) cost was coming from.
 _CONNECT_ATTEMPT_S = 3.0
 _CONNECT_ATTEMPTS = 4
+# Cadence for re-suppressing BR/EDR Inquiry while polling one pending
+# connect (see _connect_dst_with_polling) -- a bit under the ~1s it takes
+# Inquiry to creep back, so the connect is never exposed to it for long.
+_POLL_SUBINTERVAL_S = 0.8
 
 
 def _adapter_index() -> str:
@@ -444,16 +449,9 @@ class _ConnectHub:
         with _CONNECT_LOCK:
             last_detail = "no attempts"
             for attempt in range(_CONNECT_ATTEMPTS):
-                # BR/EDR Inquiry restarts ~1s after being stopped (same-host
-                # btmon finding); each attempt window is up to ~0.9s, so
-                # re-stop it right before every attempt. Note: the cadence
-                # that wedged the adapter on hardware was a 0.3s background
-                # thread; once per ~0.9s attempt is 3x lighter than that
-                # while still staying inside the restart budget.
-                _force_bt_inquiry_off()
                 ctrl = SwitchController(mac, adapter)
                 for dst in (att.LE_PUBLIC, att.LE_RANDOM):
-                    ok, detail = ctrl.att._connect_once(dst, _CONNECT_ATTEMPT_S)
+                    ok, detail = self._connect_dst_with_polling(ctrl, dst)
                     if ok:
                         ctrl.att.dst_type = dst
                         if worker.activate(ctrl):
@@ -465,6 +463,43 @@ class _ConnectHub:
                 ctrl.close()
                 time.sleep(0.02)
             return False, last_detail
+
+    @staticmethod
+    def _connect_dst_with_polling(ctrl: SwitchController, dst: int) -> tuple[bool, str]:
+        """Start one connect and poll it in short sub-intervals for up to
+        _CONNECT_ATTEMPT_S, re-suppressing BR/EDR Inquiry between polls
+        *without* closing and reopening the socket.
+
+        BR/EDR Inquiry restarts ~1s after being stopped (same-host btmon
+        finding) -- a single stop-find at the start of a multi-second wait
+        left it free to creep back in for most of that wait. Re-suppressing
+        every _POLL_SUBINTERVAL_S keeps the connect attempt inside a mostly-
+        clear window the whole time instead. Splitting start/poll (see
+        att.py's _start_connect/_poll_connect) matters because closing a
+        socket mid-connect and reopening a new one for the next short window
+        -- the old approach -- has a real, measured cost on this hardware
+        (~1.5s for the host's Bluetooth combo chip to process the implied LE
+        Create Connection Cancel before it'll accept a new one); polling the
+        *same* pending connect avoids paying that repeatedly.
+        """
+        _force_bt_inquiry_off()
+        s, err = ctrl.att._start_connect(dst)
+        if s is None:
+            return False, err
+        deadline = time.monotonic() + _CONNECT_ATTEMPT_S
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                s.close()
+                return False, "timeout (adapter may still be scanning)"
+            status, detail = ctrl.att._poll_connect(s, min(_POLL_SUBINTERVAL_S, remaining))
+            if status == "connected":
+                ctrl.att._finish_connect(s)
+                return True, "ok"
+            if status == "failed":
+                s.close()
+                return False, detail
+            _force_bt_inquiry_off()
 
 
 class _Worker:
