@@ -1069,45 +1069,45 @@ class MainWindow(Gtk.ApplicationWindow):
         lbl.get_style_context().add_class("detail")
         box.pack_start(lbl, False, False, 0)
 
-        def name_of(p: PadStatus) -> str:
+        checks: list[tuple[Gtk.CheckButton, PadStatus]] = []
+        for p in candidates:
             side = _infer_role(p.name)
             badge = f" ({side})" if side else " (side unknown)"
-            return f"{p.name} (P{p.player}){badge}"
+            check = Gtk.CheckButton(label=f"{p.name} (P{p.player}){badge}")
+            check.set_xalign(0)
+            box.pack_start(check, False, False, 0)
+            checks.append((check, p))
+        hint = Gtk.Label(label="Pick exactly two controllers.")
+        hint.set_xalign(0)
+        hint.get_style_context().add_class("detail")
+        box.pack_start(hint, False, False, 0)
 
-        first_combo = Gtk.ComboBoxText.new()
-        for p in candidates:
-            first_combo.append(p.mac, name_of(p))
-        first_combo.set_active(0)
-        second_combo = Gtk.ComboBoxText.new()
-        for p in candidates:
-            second_combo.append(p.mac, name_of(p))
-        second_combo.set_active(1 if len(candidates) > 1 else 0)
+        def refresh(_w=None) -> None:
+            n = sum(c.get_active() for c, _ in checks)
+            dlg.set_response_sensitive(Gtk.ResponseType.OK, n == 2)
+            hint.set_text("" if n == 2 else "Pick exactly two controllers.")
 
-        for label, combo in (
-            ("Controller 1:", first_combo),
-            ("Controller 2:", second_combo),
-        ):
-            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-            cap = Gtk.Label(label=label)
-            cap.set_xalign(0)
-            cap.get_style_context().add_class("detail")
-            row.pack_start(cap, False, False, 0)
-            row.pack_start(combo, True, True, 0)
-            box.pack_start(row, False, False, 0)
+        for c, _ in checks:
+            c.connect("toggled", refresh)
+        # Default: the two inferred-complementary halves if present, else first two.
+        lefts = [p for p in candidates if _infer_role(p.name) == "left"]
+        rights = [p for p in candidates if _infer_role(p.name) == "right"]
+        if lefts and rights:
+            for c, p in checks:
+                c.set_active(p.mac in (lefts[0].mac, rights[0].mac))
+        else:
+            checks[0][0].set_active(True)
+            checks[1][0].set_active(True)
+        refresh()
         dlg.show_all()
         if dlg.run() != Gtk.ResponseType.OK:
             dlg.destroy()
             return
-        first_mac = first_combo.get_active_id()
-        second_mac = second_combo.get_active_id()
+        picked = [p for c, p in checks if c.get_active()]
         dlg.destroy()
-        if not first_mac or not second_mac:
+        if len(picked) != 2:
             return
-        if first_mac == second_mac:
-            self._info("Combine Two Joy-Cons", "Pick two different controllers.")
-            return
-        first = next(p for p in candidates if p.mac == first_mac)
-        second = next(p for p in candidates if p.mac == second_mac)
+        first, second = picked
 
         def task() -> tuple[bool, str]:
             rc, out = run_ngc_config(
