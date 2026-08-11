@@ -94,13 +94,6 @@ _BTMGMT_LOCK = threading.Lock()
 _LAST_BT_INQUIRY_OFF = 0.0
 _BT_INQUIRY_OFF_MIN_INTERVAL_S = 0.35
 
-# Consecutive failed connect passes for a pad -- whether or not it has ever
-# connected in this process -- before we power-cycle the adapter (see
-# _power_cycle_adapter). Each pass is _CONNECT_ATTEMPTS x _CONNECT_ATTEMPT_S
-# ~ 7s, so this fires after ~15s of continuous failure, matching the "only
-# a power cycle clears it" symptom observed on real hardware.
-_RECONNECT_FAILURES_BEFORE_POWER_CYCLE = 2
-
 
 def _run_quiet(cmd: list[str], *, timeout: float = 2.0) -> None:
     """Best-effort subprocess; never raises into the bridge."""
@@ -196,25 +189,6 @@ def _force_bt_le_scan_off() -> None:
             pass
 
 
-def _power_cycle_adapter() -> None:
-    """Toggle adapter power to clear a wedged radio state.
-
-    Real-hardware finding (today): once reconnects start failing, "only a
-    Bluetooth power cycle recovers" the adapter -- no amount of
-    stop-find/settle retries gets a connect through. This automates that
-    manual recovery. Uses BlueZ D-Bus power toggle (no sudo needed) and
-    drops other Bluetooth devices for a moment; only called by the hub when
-    every previously-connected pad has failed to reconnect repeatedly, so
-    there's no live session to lose.
-
-    Never raises.
-    """
-    _run_quiet(["bluetoothctl", "power", "off"], timeout=3.0)
-    time.sleep(1.0)
-    _run_quiet(["bluetoothctl", "power", "on"], timeout=3.0)
-    time.sleep(2.0)
-
-
 def _bluez_remove_device(mac: str) -> None:
     """Drop BlueZ's Device object so it can't race our raw ATT connect.
 
@@ -231,6 +205,30 @@ def _bluez_remove_device(mac: str) -> None:
          "org.bluez.Adapter1", "RemoveDevice", "o", path],
         timeout=1.5,
     )
+
+
+def _teardown_radio(mac: str) -> None:
+    """Scrub the radio/BlueZ side of a pad that just dropped or failed to
+    connect, so its next button-press (wake) reconnect starts clean.
+
+    Real-hardware finding: a dropped pad leaves BlueZ device objects and
+    kernel L2CAP/ATT teardown behind, and a fresh raw connect that starts
+    before that settles fails with EBUSY/timeouts -- the symptom that used
+    to "only a power cycle" clear. Removing the BlueZ device ghost and
+    giving the kernel a moment to finish the old association is the
+    software-side equivalent of that recovery: per-pad, no adapter power
+    toggle, no impact on other Bluetooth devices. Manual BT toggle stays
+    the user's last-resort recovery for a genuinely wedged hub.
+
+    Never raises.
+    """
+    if not mac:
+        return
+    try:
+        _bluez_remove_device(mac)
+        time.sleep(0.5)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def prepare_bluez_global() -> None:
@@ -502,40 +500,18 @@ class _ConnectHub:
                         else:
                             logger.info("connect to %s (%s) failed (%s)", mac, mode, detail)
                             _force_bt_inquiry_off(force=True)
-                            # Not gated on worker.ever_connected -- a radio
-                            # that's wedged before this process ever
-                            # connected anything needs the same recovery a
-                            # wedged-after-reconnecting one does. Confirmed
-                            # on real hardware: right after a service
-                            # restart, repeated first-ever-connect failures
-                            # never triggered this (ever_connected was still
-                            # False for every worker), so nothing broke the
-                            # loop except a manual Bluetooth power cycle.
-                            worker.reconnect_failures += 1
-                            if (
-                                worker.reconnect_failures
-                                >= _RECONNECT_FAILURES_BEFORE_POWER_CYCLE
-                                and not any(
-                                    w.is_connected()
-                                    for w in hub.workers_by_mac.values()
-                                )
-                            ):
-                                logger.warning(
-                                    "reconnects failing repeatedly with nothing left connected; "
-                                    "power-cycling adapter to clear wedged radio state"
-                                )
-                                _power_cycle_adapter()
-                                for w in hub.workers_by_mac.values():
-                                    w.reconnect_failures = 0
-                                hub._last_seen.clear()
-                                hub._logged.clear()
-                                # Adapter needs a moment to re-init;
-                                # bail out of this pass -- the scan
-                                # loop will re-see the pads on their
-                                # next advertisement. Also avoids the
-                                # KeyError the cleared _last_seen would
-                                # cause on the next pending mac.
-                                break
+                            # No auto power cycle (user policy: a manual BT
+                            # toggle is the only wedge recovery). Instead,
+                            # scrub the radio/BlueZ side of this specific
+                            # pad so its next wake advertisement starts from
+                            # a clean state, and wait for that next
+                            # advertisement -- the pad's own ~10s advertising
+                            # window is the natural backoff. The failed pad
+                            # is dropped from _last_seen so this pass doesn't
+                            # re-dial it before the scrub settles.
+                            _teardown_radio(mac)
+                            hub._last_seen.pop(mac, None)
+                            hub._logged.discard(mac)
 
                 for mac, (seen_at, _) in list(hub._last_seen.items()):
                     if now - seen_at > seen_ttl_s:
@@ -776,10 +752,6 @@ class _Worker:
         # see _scan_loop) from this process's first-ever connect to it,
         # which has no stale BlueZ/kernel L2CAP state to wait out.
         self.ever_connected = False
-        # Consecutive failed reconnect passes since the last success or
-        # power cycle; drives the adapter power-cycle recovery (see
-        # _scan_loop).
-        self.reconnect_failures = 0
         # dst_type (LE_PUBLIC/LE_RANDOM) that last actually worked for this
         # mac -- each fresh HCI-level connect/cancel on this hardware costs
         # a real ~1.5s tax regardless of how it's issued (see
@@ -904,7 +876,6 @@ class _Worker:
             if self.hub.bridge is not None:
                 self.hub.bridge._publish_state()
             self.ever_connected = True
-            self.reconnect_failures = 0
             self.last_dst_type = ctrl.att.dst_type
             return True
         except Exception as exc:  # noqa: BLE001
@@ -971,6 +942,12 @@ class _Worker:
             while not self._stop.is_set() and not self._disconnected.is_set():
                 self._disconnected.wait(0.5)
             self._teardown_session(full=False)
+            # Scrub the radio/BlueZ side of the dead session now, so the
+            # pad's next button-press wake advertisement reconnects cleanly
+            # instead of racing the stale device/L2CAP state (see
+            # _teardown_radio). Skipped on cleanup() -- the process is
+            # going away, there is nothing left to reconnect.
+            _teardown_radio(self.entry.mac)
 
     def cleanup(self) -> None:
         self._teardown_session(full=True)
