@@ -1074,7 +1074,7 @@ class MainWindow(Gtk.ApplicationWindow):
             side = _infer_role(p.name)
             badge = f" ({side})" if side else " (side unknown)"
             check = Gtk.CheckButton(label=f"{p.name} (P{p.player}){badge}")
-            check.set_xalign(0)
+            check.set_halign(Gtk.Align.START)
             box.pack_start(check, False, False, 0)
             checks.append((check, p))
         hint = Gtk.Label(label="Pick exactly two controllers.")
