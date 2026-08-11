@@ -15,7 +15,6 @@ import concurrent.futures
 import json
 import logging
 import os
-import pty
 import subprocess
 import threading
 import time
@@ -47,10 +46,8 @@ logger = logging.getLogger(__name__)
 _CONNECT_LOCK = threading.Lock()
 _STATUS_INTERVAL_S = 1.5
 _SCAN_SETTLE_S = 0.10
-# Per-attempt L2CAP connect wait. Short windows fail while BR/EDR Inquiry is
-# still creeping back in between _force_bt_inquiry_off() calls (see
-# _spawn_radio_suppressor); a few hundred ms is enough once it's actually
-# being kept off continuously.
+# Per-attempt L2CAP connect wait. Short windows fail when Steam keeps LE scan
+# busy; after btmgmt stop-find -l a few hundred ms is enough.
 _CONNECT_ATTEMPT_S = 0.45
 _CONNECT_ATTEMPTS = 16
 
@@ -61,10 +58,8 @@ def _adapter_index() -> str:
 
 
 _BTMGMT_LOCK = threading.Lock()
-_LAST_BT_INQUIRY_OFF = 0.0
-# Matches the sibling joyfusion project's (same host/hardware) settled
-# suppress-loop interval -- see _spawn_radio_suppressor.
-_BT_INQUIRY_OFF_MIN_INTERVAL_S = 0.3
+_LAST_LE_SCAN_OFF = 0.0
+_LE_SCAN_OFF_MIN_INTERVAL_S = 0.35
 
 
 def _run_quiet(cmd: list[str], *, timeout: float = 2.0) -> None:
@@ -80,69 +75,33 @@ def _run_quiet(cmd: list[str], *, timeout: float = 2.0) -> None:
         pass
 
 
-def _force_bt_inquiry_off(*, force: bool = False) -> None:
-    """HCI-level BR/EDR Inquiry stop.
+def _force_le_scan_off(*, force: bool = False) -> None:
+    """HCI-level LE discovery stop.
 
-    Real-hardware root cause (found investigating the same flakiness in the
-    sibling joyfusion project on this same host): the interference here was
-    never an *LE* scan despite this function's old name and old ``-l``
-    flag -- btmon during a stuck ``Discovering: yes`` window shows
-    bluetoothd (or something upstream of it; every external client
-    candidate checked there was ruled out) restarting ordinary BR/EDR
-    ``Inquiry`` back-to-back, a fresh one firing within about a second of
-    the previous one's ``Inquiry Complete``. ``btmgmt stop-find -l``
-    against BR/EDR discovery returns "Invalid Parameters" instantly -- a
-    type mismatch, not evidence the interference couldn't be stopped --
-    which is exactly why the old flag here never actually helped. ``-b``
-    (BR/EDR) actually stops it, just not for long, so callers need to keep
-    re-calling this for as long as they're mid-connect, not just once
-    before starting (see _spawn_radio_suppressor).
+    BlueZ ``StopDiscovery`` only ends *our* session. Steam/steamos-manager keeps
+    its own session forever (``Discovering`` stays true), which blocks raw L2CAP
+    create-connection. ``btmgmt stop-find -l`` stops the controller's LE scan
+    regardless of who started it. Requires passwordless ``sudo`` for btmgmt
+    (Bazzite default for this user).
 
-    BlueZ's D-Bus ``StopDiscovery`` only ends *our* session. Steam/
-    steamos-manager keeps its own session forever (``Discovering`` stays
-    true), which ``btmgmt`` can clear regardless of who started it.
-    Requires passwordless ``sudo`` for btmgmt (Bazzite default for this
-    user) -- unlike joyfusiond, this process doesn't already run as root.
-
-    Gives the child its own pty for stdin instead of the implicit
-    /dev/null a systemd service normally gets: joyfusion found btmgmt
-    (which shares bluetoothctl's readline-based CLI framework) hanging
-    indefinitely with null stdin, stuck in an early init wait before it
-    even touched Bluetooth, and only working reliably with a real
-    terminal attached. Unverified here specifically (joyfusion's own
-    testing only ever had a real terminal to compare against, launched
-    interactively, never systemd's already-null stdin) -- if pty
-    allocation itself fails, falls back to the old DEVNULL behaviour
-    rather than not running the command at all.
-
-    Never raises — a hung/failed btmgmt must not crash the bridge.
+    Never raises — a hung btmgmt must not crash the bridge.
     """
-    global _LAST_BT_INQUIRY_OFF
+    global _LAST_LE_SCAN_OFF
     now = time.monotonic()
     with _BTMGMT_LOCK:
-        if not force and (now - _LAST_BT_INQUIRY_OFF) < _BT_INQUIRY_OFF_MIN_INTERVAL_S:
+        if not force and (now - _LAST_LE_SCAN_OFF) < _LE_SCAN_OFF_MIN_INTERVAL_S:
             return
-        _LAST_BT_INQUIRY_OFF = now
+        _LAST_LE_SCAN_OFF = now
         idx = _adapter_index()
-        master_fd: Optional[int] = None
-        slave_fd: Optional[int] = None
+        # Start detached-ish: kill hung btmgmt so we never block the hub.
         try:
-            try:
-                master_fd, slave_fd = pty.openpty()
-            except OSError:
-                master_fd = slave_fd = None
-            # Start detached-ish: kill hung btmgmt so we never block the hub.
             proc = subprocess.Popen(
-                ["sudo", "-n", "btmgmt", "-i", idx, "stop-find", "-b"],
-                stdin=slave_fd if slave_fd is not None else subprocess.DEVNULL,
+                ["sudo", "-n", "btmgmt", "-i", idx, "stop-find", "-l"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            if slave_fd is not None:
-                os.close(slave_fd)
-                slave_fd = None
             try:
-                proc.wait(timeout=2.0)
+                proc.wait(timeout=1.5)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 try:
@@ -151,37 +110,6 @@ def _force_bt_inquiry_off(*, force: bool = False) -> None:
                     pass
         except Exception:  # noqa: BLE001
             pass
-        finally:
-            for fd in (master_fd, slave_fd):
-                if fd is not None:
-                    try:
-                        os.close(fd)
-                    except OSError:
-                        pass
-
-
-_RADIO_SUPPRESS_INTERVAL_S = 0.3
-
-
-def _spawn_radio_suppressor() -> threading.Event:
-    """Keep re-suppressing BR/EDR Inquiry in the background for as long as a
-    connect attempt is in flight, instead of just once (or every few
-    attempts) before it. Real-hardware finding (joyfusion, same underlying
-    issue): a single call, even right before connecting, wasn't enough --
-    Inquiry resumes roughly a second after being stopped, well before a
-    connect+session-setup handshake this long finishes. Callers must
-    ``.set()`` the returned event once their handshake resolves (success or
-    failure) to stop the background thread.
-    """
-    stop = threading.Event()
-
-    def _loop() -> None:
-        while not stop.is_set():
-            _force_bt_inquiry_off(force=True)
-            stop.wait(_RADIO_SUPPRESS_INTERVAL_S)
-
-    threading.Thread(target=_loop, name="ngc-radio-suppress", daemon=True).start()
-    return stop
 
 
 def _bluez_remove_device(mac: str) -> None:
@@ -212,7 +140,7 @@ def prepare_bluez_global() -> None:
          "org.bluez.Adapter1", "StopDiscovery"],
         timeout=1.5,
     )
-    _force_bt_inquiry_off(force=True)
+    _force_le_scan_off(force=True)
 
 
 def prepare_bluez(mac: str = "", *, remove: bool = False) -> None:
@@ -407,7 +335,7 @@ class _ConnectHub:
                             hub._logged.discard(mac)
                         else:
                             logger.info("connect to %s (%s) failed (%s)", mac, mode, detail)
-                            _force_bt_inquiry_off(force=True)
+                            _force_le_scan_off(force=True)
 
                 for mac, (seen_at, _) in list(hub._last_seen.items()):
                     if now - seen_at > seen_ttl_s:
@@ -428,28 +356,25 @@ class _ConnectHub:
         if not adapter:
             return False, "no adapter configured"
         with _CONNECT_LOCK:
-            # Keep BR/EDR Inquiry suppressed for the whole attempt loop, not
-            # just once at the start -- see _spawn_radio_suppressor.
-            stop_suppress = _spawn_radio_suppressor()
-            try:
-                last_detail = "no attempts"
-                for attempt in range(_CONNECT_ATTEMPTS):
-                    ctrl = SwitchController(mac, adapter)
-                    for dst in (att.LE_PUBLIC, att.LE_RANDOM):
-                        ok, detail = ctrl.att._connect_once(dst, _CONNECT_ATTEMPT_S)
-                        if ok:
-                            ctrl.att.dst_type = dst
-                            if worker.activate(ctrl):
-                                worker._ready.set()
-                                return True, "ok"
-                            ctrl.close()
-                            return False, "session setup failed"
-                        last_detail = detail
-                    ctrl.close()
-                    time.sleep(0.02)
-                return False, last_detail
-            finally:
-                stop_suppress.set()
+            _force_le_scan_off()
+            last_detail = "no attempts"
+            for attempt in range(_CONNECT_ATTEMPTS):
+                if attempt and attempt % 4 == 0:
+                    _force_le_scan_off()
+                ctrl = SwitchController(mac, adapter)
+                for dst in (att.LE_PUBLIC, att.LE_RANDOM):
+                    ok, detail = ctrl.att._connect_once(dst, _CONNECT_ATTEMPT_S)
+                    if ok:
+                        ctrl.att.dst_type = dst
+                        if worker.activate(ctrl):
+                            worker._ready.set()
+                            return True, "ok"
+                        ctrl.close()
+                        return False, "session setup failed"
+                    last_detail = detail
+                ctrl.close()
+                time.sleep(0.02)
+            return False, last_detail
 
 
 class _PairCoordinator:
