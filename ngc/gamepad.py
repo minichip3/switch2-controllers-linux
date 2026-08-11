@@ -282,15 +282,12 @@ class SwitchGamepad:
         self._has_trigger_axes = product in self._HAS_TRIGGER_AXES
         self._dpad_as_buttons = product in self._DPAD_AS_BUTTONS
         # A solo Joy-Con's stick reports its raw axes rotated 90 degrees
-        # from what a standalone stick should read (Left: pushing left
+        # clockwise from what a standalone stick should read (Left: pushing left
         # registered as up -- confirmed on real hardware). Rotating the
-        # input 90 degrees the other way before scaling cancels it out:
-        # Left  (x, y) -> (-y, x),  Right (x, y) -> (y, -x).
-        # Right is the mirror image of Left (its portrait-up points the
-        # opposite way in landscape grip), hence the mirrored rotation.
-        # Not needed paired, where the sticks read correctly already.
+        # input 90 degrees counter-clockwise before scaling, (x, y) -> (-y, x),
+        # cancels it out. Not needed solo-Right or paired, where the stick
+        # reads correctly already.
         self._rotate_left_stick_ccw90 = product == P.JOYCON2_LEFT_PID
-        self._rotate_right_stick_cw90 = product == P.JOYCON2_RIGHT_PID
 
         abs_axes = [
             (e.ABS_X, AbsInfo(0, STICK_MIN, STICK_MAX, 0, 0, 0)),
@@ -393,8 +390,6 @@ class SwitchGamepad:
         lx, ly = left_stick
         if self._rotate_left_stick_ccw90:
             lx, ly = -ly, lx
-        if self._rotate_right_stick_cw90:
-            lx, ly = ly, -lx
         changed |= self._emit_abs(e.ABS_X, self._scale_stick(lx))
         changed |= self._emit_abs(e.ABS_Y, -self._scale_stick(ly))
         if self._has_right_stick:
