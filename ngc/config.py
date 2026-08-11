@@ -44,6 +44,12 @@ class ControllerEntry:
     # its player slot with its other half (see bridge._PairGroup); None for a
     # standalone controller (Pro / GameCube / solo Joy-Con).
     pair_role: Optional[str] = None
+    # LE address type (att.LE_PUBLIC=1 / att.LE_RANDOM=2) that last actually
+    # connected for this MAC, persisted across process restarts so a fresh
+    # connect tries the known-good type first instead of a blind 50/50 that
+    # can burn the pad's advertising window on the wrong guess (see
+    # bridge._Worker.last_dst_type). None until a connect has ever succeeded.
+    dst_type: Optional[int] = None
 
 
 @dataclass
@@ -101,6 +107,7 @@ class Config:
                 name=c.get("name", ""),
                 bonded=bool(c.get("bonded", False)),
                 pair_role=c.get("pair_role"),
+                dst_type=c.get("dst_type"),
             )
             for i, c in enumerate(self.controllers)
         ]
@@ -110,6 +117,21 @@ class Config:
             if c["mac"].upper() == mac.upper():
                 c["bonded"] = bonded
                 return
+
+    def mark_dst_type(self, mac: str, dst_type: int) -> bool:
+        """Persist the LE address type that just connected for `mac`.
+
+        Returns True if this changed the stored value (caller should save()),
+        False if it already matched (skip the disk write on the common case
+        of every connect re-confirming the same type).
+        """
+        for c in self.controllers:
+            if c["mac"].upper() == mac.upper():
+                if c.get("dst_type") == dst_type:
+                    return False
+                c["dst_type"] = dst_type
+                return True
+        return False
 
     def is_bonded(self, mac: str) -> bool:
         for c in self.controllers:

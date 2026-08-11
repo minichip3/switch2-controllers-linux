@@ -776,8 +776,13 @@ class _Worker:
         # _connect_dst_with_polling's doc comment), so trying both address
         # types on every reconnect roughly doubles how many of those we pay
         # for no reason once we already know which one this pad uses (see
-        # _connect_sync).
-        self.last_dst_type: Optional[int] = None
+        # _connect_sync). Seeded from config (entry.dst_type) so a fresh
+        # process -- most connects, since this resets to None every restart
+        # -- already knows the hint instead of blind-guessing 50/50 on the
+        # first attempt (real-hardware log: a wrong first guess costs the
+        # full attempt_s + ~1.5s tax before falling back to the other type,
+        # which alone was enough to miss the pad's advertising window).
+        self.last_dst_type: Optional[int] = entry.dst_type
 
     def is_connected(self) -> bool:
         return self.controller is not None and self.controller.is_connected
@@ -895,6 +900,8 @@ class _Worker:
                 self.hub.bridge._publish_state()
             self.ever_connected = True
             self.last_dst_type = ctrl.att.dst_type
+            if self.config.mark_dst_type(mac, ctrl.att.dst_type):
+                self.config.save()
             return True
         except Exception as exc:  # noqa: BLE001
             logger.error("session setup failed for %s: %s", mac, exc)
