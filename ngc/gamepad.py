@@ -114,6 +114,7 @@ def button_map_for_product(product_id: int) -> dict:
     return PRO_BUTTON_MAP
 
 
+class SwitchGamepad:
     # Only the products in this set have a physical right stick / analog
     # trigger pair -- everything else (a solo Joy-Con half) declaring those
     # axes anyway just shows up as a permanently-centered phantom stick and
