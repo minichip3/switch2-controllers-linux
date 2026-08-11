@@ -154,16 +154,17 @@ def uinput_version(product: int) -> int:
 # own built-in vendor-level special-casing for vendor 0x057e (Nintendo)
 # that overrides gamecontrollerdb.txt/evdev capabilities entirely, separate
 # from -- and evaluated before -- the normal SDL_GameControllerDB path.
-# Advertising a neutral, non-Nintendo vendor ID for this pad avoids
-# triggering that path at all. 0x1209 is the pid.codes shared open-source/
-# hobbyist USB vendor ID (https://pid.codes) -- an accurate, honest choice
-# for a homebrew virtual device, not a random made-up number.
-_PIDCODES_VENDOR_ID = 0x1209
-_UINPUT_VENDOR_OVERRIDES = {P.JOYCON2_LEFT_PID: _PIDCODES_VENDOR_ID}
-
-
+#
+# Tried a neutral, non-Nintendo vendor ID (0x1209, pid.codes) to dodge that
+# special-casing. Reverted: the plan is to bind everything by hand in
+# Steam's own personalization UI anyway (rather than chase automatic
+# recognition further), and for that the real Nintendo vendor ID -- an
+# honest match for what this half-a-real-Joy-Con device actually is, same
+# evdev capability layout the real kernel hid-nintendo driver sends -- is
+# just as usable as a neutral one; whatever glyphs/icon Steam picks from
+# the vendor ID don't matter once every input is bound manually anyway.
 def uinput_vendor_id(product: int) -> int:
-    return _UINPUT_VENDOR_OVERRIDES.get(product, P.NINTENDO_VENDOR_ID)
+    return P.NINTENDO_VENDOR_ID
 
 
 DEFAULT_BUTTON_MAP = PRO_BUTTON_MAP
