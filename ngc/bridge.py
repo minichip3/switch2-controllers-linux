@@ -314,7 +314,21 @@ class _ConnectHub:
                         worker = hub.workers_by_mac.get(mac)
                         if worker is not None and not worker.is_connected():
                             _bluez_remove_device(mac)
-                    await asyncio.sleep(0.08)
+                    # Real-hardware finding, ported from the sibling joyfusion
+                    # project (same underlying issue -- same "first connect
+                    # after service start works, reconnect after a disconnect
+                    # fails" pattern confirmed on this project's own logs
+                    # too): the kernel/BlueZ hasn't finished tearing down the
+                    # just-removed device's old L2CAP/ATT association yet
+                    # when the next connect starts right after. joyfusion
+                    # needed 500ms, then found even that wasn't enough once
+                    # retries got faster (EBUSY -- a genuinely concurrent
+                    # connect-in-flight kernel error, not stale data) and
+                    # settled on 1.5s. The 80ms this used to be is nowhere
+                    # close. This is the *only* change in this pass, isolated
+                    # from the BR/EDR-flag and stdin-handling changes tried
+                    # (and reverted) earlier, to judge it cleanly on its own.
+                    await asyncio.sleep(1.5)
                 async with hub._connect_lock:
                     for mac in pending:
                         worker = hub.workers_by_mac.get(mac)
