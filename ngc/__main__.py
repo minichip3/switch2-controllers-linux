@@ -143,6 +143,9 @@ def _list(cfg: Config) -> int:
 
 
 def _remove(cfg: Config, mac: str) -> int:
+    # If the MAC is half of a combined pair, free the other half first so it
+    # doesn't stay paired to a dead slot (it becomes a standalone controller).
+    cfg.uncombine_pair(mac)
     if not cfg.remove_controller(mac):
         print(f"Controller {mac} is not in your saved list.")
         return 1
@@ -158,7 +161,7 @@ def _swap(cfg: Config, player_a: int, player_b: int) -> int:
         print(f"Could not swap player {player_a} and {player_b} — check both are saved.")
         return 1
     if ca.pair_role or cb.pair_role:
-        print("Can't swap a combined Joy-Con 2 pair slot — remove and re-pair both halves instead.")
+        print("Can't swap a combined Joy-Con 2 pair slot — uncombine it first.")
         return 1
     if not cfg.swap_players(player_a, player_b):
         return 1
@@ -183,6 +186,75 @@ def _role(cfg: Config, mac: str, player: int, role: str) -> int:
         return 1
     cfg.save()
     print(f"{entry.mac} is now P{entry.player} ({role}). Restart the bridge to apply.")
+    return 0
+
+
+def _infer_role(name: str) -> str | None:
+    """Guess which Joy-Con 2 half a saved controller is, from its name."""
+    n = (name or "").lower()
+    if "left" in n or "(l)" in n:
+        return "left"
+    if "right" in n or "(r)" in n:
+        return "right"
+    return None
+
+
+def _combine(
+    cfg: Config,
+    player_a: int,
+    player_b: int,
+    target_player: int | None = None,
+) -> int:
+    """Combine the Joy-Con 2 halves on two player slots into one pair pad.
+
+    The left/right roles are inferred from each pad's name, so the player
+    order doesn't matter (`combine --players 1 2` == `2 1`). Config-only,
+    like `swap` -- no Bluetooth involved. The pair takes the lower slot
+    (or --target N).
+    """
+    ca = cfg.find_by_player(player_a)
+    cb = cfg.find_by_player(player_b)
+    if (ca and ca.pair_role) or (cb and cb.pair_role):
+        print(f"Could not combine: P{player_a} or P{player_b} is already half of a pair — uncombine it first.")
+        return 1
+    if not ca or not cb:
+        print(f"Could not combine: need a saved controller on both P{player_a} and P{player_b}.")
+        return 1
+    role_a, role_b = _infer_role(ca.name), _infer_role(cb.name)
+    if not role_a or not role_b:
+        unknown = [e.name or e.mac for e, r in ((ca, role_a), (cb, role_b)) if not r]
+        print(
+            "Could not combine: can't tell which half is left/right for "
+            + ", ".join(unknown)
+            + ". Set the roles manually: ngc role --mac X --player N --role left"
+            " (and --role right for the other half)."
+        )
+        return 1
+    if role_a == role_b:
+        print(f"Could not combine: both are {role_a} halves — you need one of each.")
+        return 1
+    try:
+        updated = cfg.combine_players(player_a, player_b, role_a=role_a, target_player=target_player)
+    except ValueError as exc:
+        print(f"Could not combine: {exc}")
+        return 1
+    cfg.save()
+    pair = next(e for e in updated if e.pair_role)
+    names = ", ".join(f"{e.name or e.mac} ({e.pair_role})" for e in updated if e.pair_role)
+    print(f"Combined {names} into one P{pair.player} pad. Restart the bridge to apply.")
+    return 0
+
+
+def _uncombine(cfg: Config, mac: str | None = None, player: int | None = None) -> int:
+    """Split a combined Joy-Con 2 pair back into two standalone pads."""
+    updated = cfg.uncombine_pair(mac) if mac else cfg.uncombine_player(player) if player else None
+    if updated is None:
+        target = f"{mac.upper()}" if mac else f"P{player}"
+        print(f"{target} is not part of a combined pair.")
+        return 1
+    cfg.save()
+    names = ", ".join(f"{e.name or e.mac} (P{e.player})" for e in updated)
+    print(f"Uncombined: {names}. Restart the bridge to apply.")
     return 0
 
 
@@ -211,16 +283,17 @@ def _run(cfg: Config) -> int:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="ngc", description="Switch 2 controller bridge (GameCube / Pro Controller 2 / Joy-Con 2)")
     parser.add_argument("command", nargs="?", default="run",
-                        choices=["run", "pair", "rebond", "list", "remove", "swap", "role"])
+                        choices=["run", "pair", "rebond", "list", "remove", "swap", "role", "combine", "uncombine"])
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--timeout", type=float, default=30.0, help="pairing scan timeout")
     parser.add_argument("--mac", help="controller MAC (for remove)")
-    parser.add_argument("--player", type=int, help="player slot 1-8 (for pair)")
+    parser.add_argument("--player", type=int, help="player slot 1-8 (for pair / uncombine)")
     parser.add_argument(
         "--role", choices=["left", "right"],
         help="combine this Joy-Con 2 half with its other half into one player pad (for pair/role)",
     )
-    parser.add_argument("--players", nargs=2, type=int, metavar=("A", "B"), help="player slots to swap")
+    parser.add_argument("--players", nargs=2, type=int, metavar=("A", "B"), help="player slots (for swap / combine / uncombine)")
+    parser.add_argument("--target", type=int, metavar="N", help="player slot for the combined pair (combine; default: lower of A/B)")
     args = parser.parse_args(argv)
     _setup_logging(args.verbose)
 
@@ -247,6 +320,16 @@ def main(argv=None) -> int:
             print("Usage: ngc role --mac AA:BB:CC:DD:EE:FF --player N --role left/right")
             return 1
         return _role(cfg, args.mac, args.player, args.role)
+
+    if args.command == "combine":
+        a, b = (args.players if args.players else (1, 2))
+        return _combine(cfg, a, b, target_player=args.target)
+
+    if args.command == "uncombine":
+        if not args.mac and args.player is None:
+            print("Usage: ngc uncombine --mac AA:BB:CC:DD:EE:FF   (or)   ngc uncombine --player 1")
+            return 1
+        return _uncombine(cfg, args.mac, args.player)
 
     if args.command == "list":
         return _list(cfg)

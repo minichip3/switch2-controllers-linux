@@ -179,6 +179,87 @@ class Config:
         self.controllers = [c for c in self.controllers if c["mac"].upper() != mac]
         return len(self.controllers) < before
 
+    def _next_free_player(self, exclude: set[int] | None = None) -> int | None:
+        used = {c.get("player", 0) for c in self.controllers}
+        if exclude:
+            used -= set(exclude)
+        return next((p for p in range(1, 9) if p not in used), None)
+
+    def uncombine_pair(self, mac: str) -> Optional[list[ControllerEntry]]:
+        """Split a combined Joy-Con 2 pair back into two standalone pads.
+
+        The half named by `mac` keeps its player slot; the other half moves to
+        the next free slot (two halves shared one player number, and two
+        standalone controllers can't). Returns the updated entries, or None
+        if `mac` isn't in a pair.
+        """
+        mac = mac.upper()
+        entries = self.entries()
+        target = next((e for e in entries if e.mac.upper() == mac), None)
+        if not target or not target.pair_role:
+            return None
+        mate = next(
+            (e for e in entries
+             if e.mac.upper() != mac and e.player == target.player and e.pair_role),
+            None,
+        )
+        for c in self.controllers:
+            if c["mac"].upper() == mac:
+                c["pair_role"] = None
+            elif mate and c["mac"].upper() == mate.mac.upper():
+                c["pair_role"] = None
+                # The target keeps its slot; the mate needs a free one. `used`
+                # already includes the target's player, so no exclude needed.
+                c["player"] = self._next_free_player() or target.player
+        return self.entries()
+
+    def uncombine_player(self, player: int) -> Optional[list[ControllerEntry]]:
+        """Split the pair on `player`'s slot (both halves share the number)."""
+        entry = self.find_by_player(player)
+        if not entry:
+            return None
+        return self.uncombine_pair(entry.mac)
+
+    def combine_players(
+        self,
+        player_a: int,
+        player_b: int,
+        role_a: str,
+        target_player: Optional[int] = None,
+    ) -> list[ControllerEntry]:
+        """Combine the pads on two player slots into one Joy-Con 2 pair.
+
+        `role_a` ("left"/"right") is the role of `player_a`'s pad; `player_b`'s
+        pad gets the opposite role. The pair takes the lower of the two slots
+        (or `target_player`). Raises ValueError for bad/ambiguous inputs;
+        returns all entries on success.
+        """
+        if role_a not in ("left", "right"):
+            raise ValueError("role_a must be 'left' or 'right'")
+        if player_a == player_b:
+            raise ValueError("players A and B must be different slots")
+        ca = self.find_by_player(player_a)
+        cb = self.find_by_player(player_b)
+        if ca and ca.pair_role:
+            raise ValueError(f"P{player_a} is already half of a pair — uncombine it first")
+        if cb and cb.pair_role:
+            raise ValueError(f"P{player_b} is already half of a pair — uncombine it first")
+        if not ca or not cb:
+            raise ValueError(f"need a saved controller on both P{player_a} and P{player_b}")
+        role_b = "right" if role_a == "left" else "left"
+        target = target_player or min(player_a, player_b)
+        if target not in (player_a, player_b) and self._player_taken(target, ca.mac, role_a):
+            raise ValueError(f"player {target} already in use")
+        # Update in an order that never trips the shared-slot check: the side
+        # already on the target slot first, then the other side moves in.
+        first, second = (ca, cb) if target == player_a else (cb, ca)
+        first_role, second_role = (
+            (role_a, role_b) if first.mac == ca.mac else (role_b, role_a)
+        )
+        self.add_controller(first.mac, player=target, pair_role=first_role)
+        self.add_controller(second.mac, player=target, pair_role=second_role)
+        return self.entries()
+
     def swap_players(self, player_a: int, player_b: int) -> bool:
         ca = cb = None
         for c in self.controllers:
