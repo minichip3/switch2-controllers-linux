@@ -45,12 +45,43 @@ logger = logging.getLogger(__name__)
 # Most adapters allow only ONE outstanding LE create-connection at a time.
 _CONNECT_LOCK = threading.Lock()
 _STATUS_INTERVAL_S = 1.5
-_SCAN_SETTLE_S = 0.10
-# Per-attempt L2CAP connect wait. Short windows fail while BR/EDR Inquiry
-# is still creeping back in between _force_bt_inquiry_off() calls; a few
-# hundred ms is enough once it's actually off.
-_CONNECT_ATTEMPT_S = 0.45
-_CONNECT_ATTEMPTS = 16
+# Delay between our own BLE scan burst stopping and the first btmgmt/connect
+# call afterward. Real-hardware finding: sending an HCI/mgmt command while
+# our own prior radio activity (a pending connect, or -- this one -- our
+# own scan) hasn't fully settled stalls behind it on the same HCI command
+# queue for a real, measured ~1.5s (see _connect_dst_with_polling's doc
+# comment for the pending-connect case). The old 0.10s value predates that
+# finding and was too short to matter -- consistent with the connect right
+# after a scan burst failing almost every time on real hardware, succeeding
+# only once enough time had passed some other way (e.g. a later scan-loop
+# pass). 1.5s matches the measured settle cost directly instead of guessing
+# at a smaller number.
+_SCAN_SETTLE_S = 1.5
+# Time budget to poll ONE pending connect (one dst_type within one outer
+# attempt) before giving up on it -- see _connect_dst_with_polling, whose
+# doc comment covers the debug-instrumented real-hardware finding that
+# re-suppressing BR/EDR Inquiry *during* this wait costs more than it
+# saves (a btmgmt call issued while our own LE Create Connection is
+# pending stalls on the same HCI command queue as that pending connect).
+# Suppressed once before the connect starts and then left alone.
+_CONNECT_ATTEMPT_S = 3.0
+# Tried a shorter budget for "wake" mode specifically here, on the theory
+# its advertising window was tighter than "pairing" mode's -- reverted,
+# 미니 confirmed the two modes' advertising windows are both ~10s, so that
+# wasn't the actual difference. The real pattern (per real-hardware
+# testing): the *first* connect attempt right after our own scan burst
+# fails almost every time, on both modes, and only a later pass (after our
+# own scan has had more time to settle) succeeds -- see _SCAN_SETTLE_S.
+# Each dst_type tried costs ~1.5s (HCI-queue tax) + up to _CONNECT_ATTEMPT_S
+# regardless of outcome (see _connect_dst_with_polling), and both types are
+# always tried (see _connect_sync -- skipping the non-hinted type turned
+# out to be unsafe), so one outer attempt already costs ~9s -- close to
+# the Joy-Con 2's ~10s wake-mode advertising window on its own. 1 outer
+# attempt per _connect_sync call; the scan loop retries on the pad's next
+# advertisement regardless, so this just means a failed pass waits for
+# that next advertisement instead of burning through a second one here
+# that likely wouldn't fit in the same window anyway.
+_CONNECT_ATTEMPTS = 1
 
 
 def _adapter_index() -> str:
@@ -62,11 +93,11 @@ _BTMGMT_LOCK = threading.Lock()
 _LAST_BT_INQUIRY_OFF = 0.0
 _BT_INQUIRY_OFF_MIN_INTERVAL_S = 0.35
 
-# Consecutive failed reconnect passes for a pad that previously connected
-# before we power-cycle the adapter (see _power_cycle_adapter). Each pass is
-# _CONNECT_ATTEMPTS x _CONNECT_ATTEMPT_S ~ 7s, so this fires after ~15s of
-# continuous failure, matching the "only a power cycle clears it" symptom
-# observed on real hardware.
+# Consecutive failed connect passes for a pad -- whether or not it has ever
+# connected in this process -- before we power-cycle the adapter (see
+# _power_cycle_adapter). Each pass is _CONNECT_ATTEMPTS x _CONNECT_ATTEMPT_S
+# ~ 7s, so this fires after ~15s of continuous failure, matching the "only
+# a power cycle clears it" symptom observed on real hardware.
 _RECONNECT_FAILURES_BEFORE_POWER_CYCLE = 2
 
 
@@ -128,6 +159,17 @@ def _force_bt_inquiry_off(*, force: bool = False) -> None:
                     pass
         except Exception:  # noqa: BLE001
             pass
+
+
+# Tried toggling BR/EDR off for the duration of a connect attempt (to make
+# Inquiry structurally impossible instead of racing to re-cancel it -- see
+# _connect_dst_with_polling's doc comment for the Inquiry-restarts-in-~3ms
+# btmon finding this was responding to). Doesn't work: ``btmgmt bredr off``
+# is rejected (status 0x0b) while the adapter is powered on -- BlueZ only
+# allows changing BR/EDR mode with the controller powered off, i.e. this
+# has the same real cost as _power_cycle_adapter (drops every other
+# Bluetooth device on the adapter too), which is exactly what this was
+# meant to avoid. Abandoned.
 
 
 def _power_cycle_adapter() -> None:
@@ -383,32 +425,40 @@ class _ConnectHub:
                         else:
                             logger.info("connect to %s (%s) failed (%s)", mac, mode, detail)
                             _force_bt_inquiry_off(force=True)
-                            if worker.ever_connected:
-                                worker.reconnect_failures += 1
-                                if (
-                                    worker.reconnect_failures
-                                    >= _RECONNECT_FAILURES_BEFORE_POWER_CYCLE
-                                    and not any(
-                                        w.is_connected()
-                                        for w in hub.workers_by_mac.values()
-                                    )
-                                ):
-                                    logger.warning(
-                                        "reconnects failing repeatedly with nothing left connected; "
-                                        "power-cycling adapter to clear wedged radio state"
-                                    )
-                                    _power_cycle_adapter()
-                                    for w in hub.workers_by_mac.values():
-                                        w.reconnect_failures = 0
-                                    hub._last_seen.clear()
-                                    hub._logged.clear()
-                                    # Adapter needs a moment to re-init;
-                                    # bail out of this pass -- the scan
-                                    # loop will re-see the pads on their
-                                    # next advertisement. Also avoids the
-                                    # KeyError the cleared _last_seen would
-                                    # cause on the next pending mac.
-                                    break
+                            # Not gated on worker.ever_connected -- a radio
+                            # that's wedged before this process ever
+                            # connected anything needs the same recovery a
+                            # wedged-after-reconnecting one does. Confirmed
+                            # on real hardware: right after a service
+                            # restart, repeated first-ever-connect failures
+                            # never triggered this (ever_connected was still
+                            # False for every worker), so nothing broke the
+                            # loop except a manual Bluetooth power cycle.
+                            worker.reconnect_failures += 1
+                            if (
+                                worker.reconnect_failures
+                                >= _RECONNECT_FAILURES_BEFORE_POWER_CYCLE
+                                and not any(
+                                    w.is_connected()
+                                    for w in hub.workers_by_mac.values()
+                                )
+                            ):
+                                logger.warning(
+                                    "reconnects failing repeatedly with nothing left connected; "
+                                    "power-cycling adapter to clear wedged radio state"
+                                )
+                                _power_cycle_adapter()
+                                for w in hub.workers_by_mac.values():
+                                    w.reconnect_failures = 0
+                                hub._last_seen.clear()
+                                hub._logged.clear()
+                                # Adapter needs a moment to re-init;
+                                # bail out of this pass -- the scan
+                                # loop will re-see the pads on their
+                                # next advertisement. Also avoids the
+                                # KeyError the cleared _last_seen would
+                                # cause on the next pending mac.
+                                break
 
                 for mac, (seen_at, _) in list(hub._last_seen.items()):
                     if now - seen_at > seen_ttl_s:
@@ -428,19 +478,29 @@ class _ConnectHub:
         adapter = self.config.adapter_mac
         if not adapter:
             return False, "no adapter configured"
+        attempt_s = _CONNECT_ATTEMPT_S
+        # Every dst_type tried costs a real ~1.5s HCI-queue tax on top of the
+        # poll wait itself (see _connect_dst_with_polling), regardless of
+        # whether it succeeds, so trying the previously-successful dst_type
+        # first (worker.last_dst_type) saves that cost in the common case.
+        # Tried skipping the *other* type entirely once a hint exists --
+        # reverted: on real hardware, a "wake"-mode advertisement (reconnect
+        # to a specific bonded host) failed fast with a real SO_ERROR right
+        # after this landed, immediately after a dst_type had just been
+        # learned from a "pairing"-mode connect -- consistent with wake and
+        # pairing mode not always using the same LE address type for the
+        # same physical pad. Always try both; only the *order* is hinted.
+        dst_types = (
+            (worker.last_dst_type, att.LE_RANDOM if worker.last_dst_type == att.LE_PUBLIC else att.LE_PUBLIC)
+            if worker.last_dst_type is not None
+            else (att.LE_PUBLIC, att.LE_RANDOM)
+        )
         with _CONNECT_LOCK:
             last_detail = "no attempts"
             for attempt in range(_CONNECT_ATTEMPTS):
-                # BR/EDR Inquiry restarts ~1s after being stopped (same-host
-                # btmon finding); each attempt window is up to ~0.9s, so
-                # re-stop it right before every attempt. Note: the cadence
-                # that wedged the adapter on hardware was a 0.3s background
-                # thread; once per ~0.9s attempt is 3x lighter than that
-                # while still staying inside the restart budget.
-                _force_bt_inquiry_off()
                 ctrl = SwitchController(mac, adapter)
-                for dst in (att.LE_PUBLIC, att.LE_RANDOM):
-                    ok, detail = ctrl.att._connect_once(dst, _CONNECT_ATTEMPT_S)
+                for dst in dst_types:
+                    ok, detail = self._connect_dst_with_polling(ctrl, dst, attempt_s)
                     if ok:
                         ctrl.att.dst_type = dst
                         if worker.activate(ctrl):
@@ -451,7 +511,42 @@ class _ConnectHub:
                     last_detail = detail
                 ctrl.close()
                 time.sleep(0.02)
+            if worker.last_dst_type is not None:
+                worker.last_dst_type = None
             return False, last_detail
+
+    @staticmethod
+    def _connect_dst_with_polling(ctrl: SwitchController, dst: int, attempt_s: float) -> tuple[bool, str]:
+        """Start one connect and poll it to completion or attempt_s, without
+        touching btmgmt again once the connect is in flight.
+
+        Tried re-suppressing BR/EDR Inquiry on every short sub-poll here
+        (every _POLL_SUBINTERVAL_S) on the theory that Inquiry creeping back
+        ~1s after being stopped needed to be re-cancelled repeatedly to keep
+        a multi-second wait clear. Debug-instrumented on real hardware and
+        disproven: each individual select() poll returned in exactly its
+        requested time (no bug there), but a ~1.5s gap appeared *between*
+        polls -- right where the per-poll _force_bt_inquiry_off() call sits.
+        Sending a btmgmt command while our own LE Create Connection is
+        already pending apparently has to wait on the same HCI command queue
+        as that pending connect, so re-suppressing mid-wait was costing
+        almost exactly the price it was trying to avoid. Suppressing once,
+        before starting the connect, and then leaving the pending connect
+        alone for the whole wait avoids that self-inflicted stall -- even
+        though Inquiry may creep back in before this wait ends.
+        """
+        _force_bt_inquiry_off()
+        s, err = ctrl.att._start_connect(dst)
+        if s is None:
+            return False, err
+        status, detail = ctrl.att._poll_connect(s, attempt_s)
+        if status == "connected":
+            ctrl.att._finish_connect(s)
+            return True, "ok"
+        s.close()
+        if status == "pending":
+            return False, "timeout (adapter may still be scanning)"
+        return False, detail
 
 
 class _Worker:
@@ -489,6 +584,14 @@ class _Worker:
         # power cycle; drives the adapter power-cycle recovery (see
         # _scan_loop).
         self.reconnect_failures = 0
+        # dst_type (LE_PUBLIC/LE_RANDOM) that last actually worked for this
+        # mac -- each fresh HCI-level connect/cancel on this hardware costs
+        # a real ~1.5s tax regardless of how it's issued (see
+        # _connect_dst_with_polling's doc comment), so trying both address
+        # types on every reconnect roughly doubles how many of those we pay
+        # for no reason once we already know which one this pad uses (see
+        # _connect_sync).
+        self.last_dst_type: Optional[int] = None
 
     def is_connected(self) -> bool:
         return self.controller is not None and self.controller.is_connected
@@ -584,6 +687,7 @@ class _Worker:
                 self.hub.bridge._publish_state()
             self.ever_connected = True
             self.reconnect_failures = 0
+            self.last_dst_type = ctrl.att.dst_type
             return True
         except Exception as exc:  # noqa: BLE001
             logger.error("session setup failed for %s: %s", mac, exc)

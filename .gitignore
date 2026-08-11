@@ -10,3 +10,4 @@ controller_memory.bin
 config.json
 decky/**/node_modules/
 decky/**/*.zip
+.git-credentials
