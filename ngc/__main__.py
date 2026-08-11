@@ -75,6 +75,12 @@ async def _pair(
         from .config import detect_adapter
 
         cfg.adapter_mac = detect_adapter()
+    if not cfg.adapter_mac:
+        print(
+            "No Bluetooth adapter found (nothing under /sys/class/bluetooth). "
+            "Check that a Bluetooth adapter is present and its driver is loaded."
+        )
+        return False
     # --role left/right combines this Joy-Con 2 half with its other half into
     # one P<player> pad instead of giving it a player slot of its own: pair
     # the left half with `ngc pair --player 1 --role left`, then the right
@@ -114,6 +120,12 @@ async def _rebond(cfg: Config, timeout: float) -> bool:
         from .config import detect_adapter
 
         cfg.adapter_mac = detect_adapter()
+    if not cfg.adapter_mac:
+        print(
+            "No Bluetooth adapter found (nothing under /sys/class/bluetooth). "
+            "Check that a Bluetooth adapter is present and its driver is loaded."
+        )
+        return False
     entry = cfg.add_controller(found.device.address, name=found.name)
     cfg.save()
     cfg.mark_bonded(found.device.address, False)
