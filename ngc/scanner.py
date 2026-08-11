@@ -10,10 +10,38 @@ from typing import Optional
 
 from bleak import BleakScanner
 from bleak.backends.device import BLEDevice
+from bleak.exc import BleakDBusError
 
 from . import protocol as P
 
 logger = logging.getLogger(__name__)
+
+
+async def _start_scanner(scanner: BleakScanner) -> None:
+    """`scanner.start()` with the same [org.bluez.Error.InProgress] retry
+    bridge.py's connect loop uses -- another client (GNOME/KDE's Bluetooth
+    applet, decky-bluetooth-wake-control, a previous stray scan) can be
+    holding LE discovery when this is called directly from the CLI (`ngc
+    pair`), which has no outer loop to fall back into like the bridge's
+    scan loop does. Without this, that InProgress crashes the whole
+    command instead of clearing and retrying.
+    """
+    for attempt in range(1, 4):
+        try:
+            await scanner.start()
+            return
+        except BleakDBusError as exc:
+            if "InProgress" not in str(exc):
+                raise
+            from .bridge import prepare_bluez_global, _force_bt_le_scan_off
+
+            prepare_bluez_global()
+            _force_bt_le_scan_off()
+            logger.warning(
+                "LE scan held by another client; cleared, retry %d/3", attempt
+            )
+            await asyncio.sleep(0.5 * attempt)
+    await scanner.start()
 
 _SUPPORTED_PIDS = {
     P.JOYCON2_RIGHT_PID,
@@ -70,7 +98,7 @@ async def scan(
             logger.info("found %s %04X:%04X (%s)", device.address, vid, pid, P.CONTROLLER_NAMES.get(pid))
 
     scanner = BleakScanner(detection_callback=_cb)
-    await scanner.start()
+    await _start_scanner(scanner)
     try:
         await asyncio.sleep(timeout)
     finally:
@@ -101,7 +129,7 @@ async def find_first(
         stop.set()
 
     scanner = BleakScanner(detection_callback=_cb)
-    await scanner.start()
+    await _start_scanner(scanner)
     try:
         await asyncio.wait_for(stop.wait(), timeout=timeout)
     except asyncio.TimeoutError:
@@ -147,7 +175,7 @@ async def wait_for_addresses(
         done.set()
 
     scanner = BleakScanner(detection_callback=_cb)
-    await scanner.start()
+    await _start_scanner(scanner)
     try:
         waiters = [asyncio.create_task(done.wait())]
         if stop is not None:
