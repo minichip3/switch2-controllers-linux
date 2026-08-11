@@ -150,6 +150,41 @@ JOYCON2_RIGHT_BUTTON_MAP = {
     "R_STK": e.BTN_THUMBR,
 }
 
+# Not a real BLE product ID -- a local-only tag for the virtual gamepad that
+# _PairGroup (bridge.py) creates when a left+right Joy-Con 2 pair is combined
+# into one player slot. Picked adjacent to the two real Joy-Con 2 PIDs
+# (0x2066 Right, 0x2067 Left) purely so it stays visually grouped with them;
+# nothing ever advertises or scans for this value over BLE.
+JOYCON2_PAIR_PID = 0x2068
+
+# Combined Joy-Con 2 pair, standard two-handed grip layout: face buttons/right
+# stick/PLUS/HOME come from the Right half (same slots as
+# JOYCON2_RIGHT_BUTTON_MAP), D-pad/left stick/MINUS/CAPTURE from the Left half
+# (same slots as JOYCON2_LEFT_BUTTON_MAP). L/ZL/R/ZR take the four standard
+# shoulder slots like PRO_BUTTON_MAP/GAMECUBE_BUTTON_MAP. SL/SR are dropped
+# here (not just remapped) -- a real grip physically covers them, and there
+# are no spare shoulder slots left once L/ZL/R/ZR claim TL/TL2/TR/TR2.
+JOYCON2_PAIR_BUTTON_MAP = {
+    "A": e.BTN_EAST,
+    "B": e.BTN_SOUTH,
+    "X": e.BTN_NORTH,
+    "Y": e.BTN_WEST,
+    "L": e.BTN_TL,
+    "ZL": e.BTN_TL2,
+    "R": e.BTN_TR,
+    "ZR": e.BTN_TR2,
+    "PLUS": e.BTN_START,
+    "MINUS": e.BTN_SELECT,
+    "HOME": e.BTN_MODE,
+    "CAPTURE": e.BTN_Z,
+    "L_STK": e.BTN_THUMBL,
+    "R_STK": e.BTN_THUMBR,
+    "UP": e.BTN_DPAD_UP,
+    "DOWN": e.BTN_DPAD_DOWN,
+    "LEFT": e.BTN_DPAD_LEFT,
+    "RIGHT": e.BTN_DPAD_RIGHT,
+}
+
 # Tried advertising the real Nintendo Switch (1) Joy-Con (L) USB product ID
 # (0x2006) here instead of the actual Switch 2 PID, on the theory that SDL's
 # built-in Joy-Con recognition would kick in for free. Backfired on real
@@ -226,7 +261,7 @@ class SwitchGamepad:
     # Joy-Con's one stick is presented as the *primary* (left/ABS_X/Y)
     # stick regardless of side (see device.calibrated_input's stick-source
     # swap for it), so it has no second stick to declare here either.
-    _HAS_RIGHT_STICK = {P.PRO_CONTROLLER2_PID, P.NSO_GAMECUBE_PID}
+    _HAS_RIGHT_STICK = {P.PRO_CONTROLLER2_PID, P.NSO_GAMECUBE_PID, JOYCON2_PAIR_PID}
     _HAS_TRIGGER_AXES = {P.NSO_GAMECUBE_PID}  # only the GC pad has true analog L/R
     # Solo Left Joy-Con sends its D-pad as four discrete buttons (see
     # JOYCON2_LEFT_BUTTON_MAP), not a Hat0X/Y axis -- so it needs neither
@@ -236,7 +271,7 @@ class SwitchGamepad:
     # doesn't need the hat either -- lands in this set for the same "skip
     # declaring/emitting Hat0X/Y" effect even though it has no D-pad-as-
     # buttons mapping of its own.
-    _DPAD_AS_BUTTONS = {P.JOYCON2_LEFT_PID, P.JOYCON2_RIGHT_PID}
+    _DPAD_AS_BUTTONS = {P.JOYCON2_LEFT_PID, P.JOYCON2_RIGHT_PID, JOYCON2_PAIR_PID}
     # SDL's evdev joystick classifier (SDL_EVDEV_GuessDeviceClass, checked
     # against actual SDL source) only sets ID_INPUT_JOYSTICK if, besides
     # ABS_X/Y, the device has BTN_TRIGGER, BTN_A, BTN_1, or one of a handful
@@ -281,13 +316,16 @@ class SwitchGamepad:
         self._has_right_stick = product in self._HAS_RIGHT_STICK
         self._has_trigger_axes = product in self._HAS_TRIGGER_AXES
         self._dpad_as_buttons = product in self._DPAD_AS_BUTTONS
-        # A solo Joy-Con's stick reports its raw axes rotated 90 degrees
-        # clockwise from what a standalone stick should read (Left: pushing left
+        # The Left Joy-Con's stick reports its raw axes rotated 90 degrees
+        # clockwise from what a standalone stick should read (pushing left
         # registered as up -- confirmed on real hardware). Rotating the
         # input 90 degrees counter-clockwise before scaling, (x, y) -> (-y, x),
-        # cancels it out. Not needed solo-Right or paired, where the stick
-        # reads correctly already.
-        self._rotate_left_stick_ccw90 = product == P.JOYCON2_LEFT_PID
+        # cancels it out. Not needed solo-Right, where the stick reads
+        # correctly already. This is a raw-report decode quirk of the Left
+        # half's hardware, not a solo-mode artifact, so a combined pair's
+        # left_stick -- routed straight from the Left half's own raw stick,
+        # see _PairGroup in bridge.py -- needs the same correction.
+        self._rotate_left_stick_ccw90 = product in (P.JOYCON2_LEFT_PID, JOYCON2_PAIR_PID)
 
         abs_axes = [
             (e.ABS_X, AbsInfo(0, STICK_MIN, STICK_MAX, 0, 0, 0)),
