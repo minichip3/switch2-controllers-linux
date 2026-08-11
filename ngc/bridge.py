@@ -46,11 +46,24 @@ logger = logging.getLogger(__name__)
 _CONNECT_LOCK = threading.Lock()
 _STATUS_INTERVAL_S = 1.5
 _SCAN_SETTLE_S = 0.10
-# Per-attempt L2CAP connect wait. Short windows fail while BR/EDR Inquiry
-# is still creeping back in between _force_bt_inquiry_off() calls; a few
-# hundred ms is enough once it's actually off.
-_CONNECT_ATTEMPT_S = 0.45
-_CONNECT_ATTEMPTS = 16
+# Per-attempt L2CAP connect wait. Originally kept short (0.45s x16, and
+# 0.12s x24 before that) on the assumption that once BR/EDR Inquiry
+# interference is cleared, the actual connect finishes quickly -- but a
+# precise (microsecond) journalctl trace on real hardware during repeated
+# reconnect failures showed each failed attempt costing ~2.46s wall-clock,
+# not the ~0.9s (2 dst types x _CONNECT_ATTEMPT_S) the code alone accounts
+# for. sudo+btmgmt itself measured at ~60ms, ruling that out -- the
+# remaining ~1.5s/attempt lines up with the host's Bluetooth combo chip
+# needing real time to process an LE Create Connection Cancel once select()
+# times out and the socket is closed, before it'll accept the next create-
+# connection request. 16 attempts x ~2.46s real cost was burning ~39s per
+# reconnect pass -- comfortably longer than the Joy-Con 2's ~10s
+# advertising window, so most reconnect attempts likely never got a fair
+# shot at actually completing before the pad stopped advertising. Fewer,
+# longer attempts (same rough time budget) let a connect actually finish
+# instead of getting cancelled just before it would have.
+_CONNECT_ATTEMPT_S = 3.0
+_CONNECT_ATTEMPTS = 4
 
 
 def _adapter_index() -> str:
