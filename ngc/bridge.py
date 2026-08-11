@@ -46,29 +46,15 @@ logger = logging.getLogger(__name__)
 _CONNECT_LOCK = threading.Lock()
 _STATUS_INTERVAL_S = 1.5
 _SCAN_SETTLE_S = 0.10
-# Total time budget to poll ONE pending connect (one dst_type within one
-# outer attempt) before giving up on it -- see _connect_dst_with_polling.
-# Originally this was a single select() timeout, kept short (0.45s x16, and
-# 0.12s x24 before that) on the assumption that once BR/EDR Inquiry
-# interference is cleared, the actual connect finishes quickly. A precise
-# (microsecond) journalctl trace on real hardware during repeated reconnect
-# failures disproved that: each failed attempt cost ~2.46s wall-clock, not
-# the ~0.9s (2 dst types x the old 0.45s) the code alone accounted for --
-# sudo+btmgmt itself measured at ~60ms, ruling that out. Simply raising the
-# single-poll timeout (tried first) made each failed attempt take
-# proportionally longer (~7.55s at 3.0s) without fixing anything, because
-# Inquiry creeps back ~1s after being stopped and a single stop-find at the
-# start of a multi-second wait leaves it free to interfere for the rest of
-# it. _connect_dst_with_polling instead re-suppresses Inquiry every
-# _POLL_SUBINTERVAL_S *without* closing/reopening the socket -- closing a
-# pending connect and starting a new one is what the ~1.5s/attempt
-# (LE Create Connection Cancel) cost was coming from.
+# Time budget to poll ONE pending connect (one dst_type within one outer
+# attempt) before giving up on it -- see _connect_dst_with_polling, whose
+# doc comment covers the debug-instrumented real-hardware finding that
+# re-suppressing BR/EDR Inquiry *during* this wait costs more than it
+# saves (a btmgmt call issued while our own LE Create Connection is
+# pending stalls on the same HCI command queue as that pending connect).
+# Suppressed once before the connect starts and then left alone.
 _CONNECT_ATTEMPT_S = 3.0
 _CONNECT_ATTEMPTS = 4
-# Cadence for re-suppressing BR/EDR Inquiry while polling one pending
-# connect (see _connect_dst_with_polling) -- a bit under the ~1s it takes
-# Inquiry to creep back, so the connect is never exposed to it for long.
-_POLL_SUBINTERVAL_S = 0.8
 
 
 def _adapter_index() -> str:
@@ -477,50 +463,36 @@ class _ConnectHub:
 
     @staticmethod
     def _connect_dst_with_polling(ctrl: SwitchController, dst: int) -> tuple[bool, str]:
-        """Start one connect and poll it in short sub-intervals for up to
-        _CONNECT_ATTEMPT_S, re-suppressing BR/EDR Inquiry between polls
-        *without* closing and reopening the socket.
+        """Start one connect and poll it to completion or _CONNECT_ATTEMPT_S,
+        without touching btmgmt again once the connect is in flight.
 
-        BR/EDR Inquiry restarts ~1s after being stopped (same-host btmon
-        finding) -- a single stop-find at the start of a multi-second wait
-        left it free to creep back in for most of that wait. Re-suppressing
-        every _POLL_SUBINTERVAL_S keeps the connect attempt inside a mostly-
-        clear window the whole time instead. Splitting start/poll (see
-        att.py's _start_connect/_poll_connect) matters because closing a
-        socket mid-connect and reopening a new one for the next short window
-        -- the old approach -- has a real, measured cost on this hardware
-        (~1.5s for the host's Bluetooth combo chip to process the implied LE
-        Create Connection Cancel before it'll accept a new one); polling the
-        *same* pending connect avoids paying that repeatedly.
+        Tried re-suppressing BR/EDR Inquiry on every short sub-poll here
+        (every _POLL_SUBINTERVAL_S) on the theory that Inquiry creeping back
+        ~1s after being stopped needed to be re-cancelled repeatedly to keep
+        a multi-second wait clear. Debug-instrumented on real hardware and
+        disproven: each individual select() poll returned in exactly its
+        requested time (no bug there), but a ~1.5s gap appeared *between*
+        polls -- right where the per-poll _force_bt_inquiry_off() call sits.
+        Sending a btmgmt command while our own LE Create Connection is
+        already pending apparently has to wait on the same HCI command queue
+        as that pending connect, so re-suppressing mid-wait was costing
+        almost exactly the price it was trying to avoid. Suppressing once,
+        before starting the connect, and then leaving the pending connect
+        alone for the whole wait avoids that self-inflicted stall -- even
+        though Inquiry may creep back in before this wait ends.
         """
         _force_bt_inquiry_off()
         s, err = ctrl.att._start_connect(dst)
         if s is None:
             return False, err
-        t0 = time.monotonic()
-        deadline = t0 + _CONNECT_ATTEMPT_S
-        poll_n = 0
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                s.close()
-                logger.info("TEMP-DEBUG dst=%s gave up after %d polls, %.3fs elapsed", dst, poll_n, time.monotonic() - t0)
-                return False, "timeout (adapter may still be scanning)"
-            poll_timeout = min(_POLL_SUBINTERVAL_S, remaining)
-            poll_start = time.monotonic()
-            status, detail = ctrl.att._poll_connect(s, poll_timeout)
-            poll_n += 1
-            logger.info(
-                "TEMP-DEBUG dst=%s poll#%d requested=%.3fs actual=%.3fs status=%s",
-                dst, poll_n, poll_timeout, time.monotonic() - poll_start, status,
-            )
-            if status == "connected":
-                ctrl.att._finish_connect(s)
-                return True, "ok"
-            if status == "failed":
-                s.close()
-                return False, detail
-            _force_bt_inquiry_off()
+        status, detail = ctrl.att._poll_connect(s, _CONNECT_ATTEMPT_S)
+        if status == "connected":
+            ctrl.att._finish_connect(s)
+            return True, "ok"
+        s.close()
+        if status == "pending":
+            return False, "timeout (adapter may still be scanning)"
+        return False, detail
 
 
 class _Worker:
