@@ -113,6 +113,26 @@ JOYCON2_LEFT_BUTTON_MAP = {
     "RIGHT": e.BTN_DPAD_RIGHT,
 }
 
+# Real Nintendo Switch (1) Joy-Con (L) USB product ID. Solo Left Joy-Con
+# advertises this instead of the actual Switch 2 PID (JOYCON2_LEFT_PID,
+# 0x2067 -- a value nothing in SDL/Dolphin/Steam's databases has ever seen)
+# so SDL's and Dolphin's own built-in Joy-Con recognition (semantic button
+# glyphs/labels instead of generic "Button 1/2/3") can kick in. This isn't
+# a cosmetic label trick -- JOYCON2_LEFT_BUTTON_MAP already sends the exact
+# same evdev capability layout the real kernel hid-nintendo driver does for
+# a Joy-Con (L), so posing as one on the wire is accurate, not misleading.
+_REAL_JOYCON1_LEFT_PID = 0x2006
+
+
+def uinput_product_id(product: int) -> int:
+    """Product ID to advertise over uinput -- may differ from the real
+    BLE/protocol product ID passed everywhere else (see
+    _REAL_JOYCON1_LEFT_PID above)."""
+    if product == P.JOYCON2_LEFT_PID:
+        return _REAL_JOYCON1_LEFT_PID
+    return product
+
+
 DEFAULT_BUTTON_MAP = PRO_BUTTON_MAP
 
 
@@ -212,7 +232,7 @@ class SwitchGamepad:
             capabilities,
             name=name,
             vendor=P.NINTENDO_VENDOR_ID,
-            product=product,
+            product=uinput_product_id(product),
             version=0x0100,
             bustype=e.BUS_BLUETOOTH,
             phys=phys,
