@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from bleak import BleakScanner
+from bleak.exc import BleakDBusError
 
 from . import att
 from . import protocol as P
@@ -161,15 +162,38 @@ def _force_bt_inquiry_off(*, force: bool = False) -> None:
             pass
 
 
-# Tried toggling BR/EDR off for the duration of a connect attempt (to make
-# Inquiry structurally impossible instead of racing to re-cancel it -- see
-# _connect_dst_with_polling's doc comment for the Inquiry-restarts-in-~3ms
-# btmon finding this was responding to). Doesn't work: ``btmgmt bredr off``
-# is rejected (status 0x0b) while the adapter is powered on -- BlueZ only
-# allows changing BR/EDR mode with the controller powered off, i.e. this
-# has the same real cost as _power_cycle_adapter (drops every other
-# Bluetooth device on the adapter too), which is exactly what this was
-# meant to avoid. Abandoned.
+def _force_bt_le_scan_off() -> None:
+    """HCI-level LE scan stop (btmgmt stop-find -l).
+
+    D-Bus StopDiscovery only ends *our* session, so when another client
+    (Steam Input, decky-bluetooth-wake-control) holds the adapter's LE
+    discovery and our scanner.start() gets [org.bluez.Error.InProgress],
+    btmgmt is the only way to clear it at the HCI level. Shares the
+    btmgmt lock/throttle with _force_bt_inquiry_off. Never raises.
+    """
+    global _LAST_BT_INQUIRY_OFF
+    now = time.monotonic()
+    with _BTMGMT_LOCK:
+        if (now - _LAST_BT_INQUIRY_OFF) < _BT_INQUIRY_OFF_MIN_INTERVAL_S:
+            return
+        _LAST_BT_INQUIRY_OFF = now
+        idx = _adapter_index()
+        try:
+            proc = subprocess.Popen(
+                ["sudo", "-n", "btmgmt", "-i", idx, "stop-find", "-l"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            try:
+                proc.wait(timeout=1.5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                try:
+                    proc.wait(timeout=0.5)
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _power_cycle_adapter() -> None:
@@ -318,14 +342,42 @@ class _ConnectHub:
         return True
 
     def _run_async(self) -> None:
-        while not self.stop.is_set():
-            try:
-                self._hub_error = ""
-                asyncio.run(self._scan_loop())
-            except Exception as exc:  # noqa: BLE001
-                self._hub_error = str(exc)
-                logger.exception("connect hub crashed; restarting in 1s")
-                time.sleep(1)
+        # Keep ONE event loop for the hub's lifetime: bleak's
+        # BlueZDBusScannerManager is a process-wide singleton whose D-Bus
+        # connection binds to the loop it was first used on, so
+        # asyncio.run() per attempt (fresh loop on every crash) left the
+        # manager pinned to a dead loop. Loop reuse also makes repeated
+        # scan bursts cheap.
+        backoff = 1.0
+        fails = 0
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            while not self.stop.is_set():
+                try:
+                    self._hub_error = ""
+                    loop.run_until_complete(self._scan_loop())
+                    backoff, fails = 1.0, 0
+                except Exception as exc:  # noqa: BLE001
+                    self._hub_error = str(exc)
+                    fails += 1
+                    if fails == 1:
+                        logger.exception("connect hub crashed; restarting in %ss", backoff)
+                    else:
+                        logger.warning(
+                            "connect hub restart %d in %ss (%s)", fails, backoff, exc
+                        )
+                    if isinstance(exc, BleakDBusError) and "InProgress" in str(exc):
+                        # Another client (Steam Input, decky wake plugin) holds
+                        # the adapter's LE discovery; clear it at HCI level so
+                        # the retry has a chance instead of crash-looping.
+                        prepare_bluez_global()
+                        _force_bt_le_scan_off()
+                    time.sleep(backoff)
+                    backoff = min(backoff * 2, 30.0)
+        finally:
+            loop.close()
+            asyncio.set_event_loop(None)
 
     async def _scan_loop(self) -> None:
         hub = self
@@ -365,8 +417,33 @@ class _ConnectHub:
                     await asyncio.sleep(1.0)
 
                 scan_on_s = 0.12 if connected_count else 0.25
+                # If another client (Steam Input, decky wake plugin) holds the
+                # adapter's LE discovery, start() fails immediately with
+                # [org.bluez.Error.InProgress]. Clear the HCI-level scan and
+                # retry here so a transient Steam scan doesn't kill the whole
+                # hub loop; the _run_async backoff is the outer net.
                 hub._scanning = True
-                await hub._scanner.start()
+                for scan_attempt in range(1, 4):
+                    try:
+                        await hub._scanner.start()
+                        break
+                    except BleakDBusError as exc:
+                        if "InProgress" not in str(exc):
+                            raise
+                        hub._scanning = False
+                        prepare_bluez_global()
+                        _force_bt_le_scan_off()
+                        logger.warning(
+                            "LE scan held by another client; cleared, retry %d/3",
+                            scan_attempt,
+                        )
+                        await asyncio.sleep(0.5 * scan_attempt)
+                        hub._scanning = True
+                else:
+                    raise BleakDBusError(
+                        "org.bluez.Error.InProgress",
+                        "LE scan still held by another client after 3 clears",
+                    )
                 try:
                     await asyncio.sleep(scan_on_s)
                 finally:
