@@ -1047,8 +1047,8 @@ class MainWindow(Gtk.ApplicationWindow):
         box.set_margin_top(16)
         box.set_margin_bottom(8)
         box.set_spacing(10)
-        lbl = Gtk.Label(label="Pick which half is Left and which is Right, and the "
-                              "player slot they'll share.")
+        lbl = Gtk.Label(label="Pick which half is Left and which is Right — they'll "
+                              "combine into one pad on the lower player slot.")
         lbl.set_line_wrap(True)
         lbl.set_xalign(0)
         lbl.get_style_context().add_class("detail")
@@ -1066,18 +1066,9 @@ class MainWindow(Gtk.ApplicationWindow):
             right_combo.append(p.mac, name_of(p))
         right_combo.set_active(1 if len(candidates) > 1 else 0)
 
-        used = {p.player for p in pads}
-        default_player = min(candidates[0].player, candidates[1].player)
-        player_combo = Gtk.ComboBoxText.new()
-        for n in range(1, 9):
-            suffix = " (in use)" if n in used else ""
-            player_combo.append(str(n), f"Player {n}{suffix}")
-        player_combo.set_active(default_player - 1)
-
         for label, combo in (
             ("Left half:", left_combo),
             ("Right half:", right_combo),
-            ("Shared player slot:", player_combo),
         ):
             row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             cap = Gtk.Label(label=label)
@@ -1092,7 +1083,6 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         left_mac = left_combo.get_active_id()
         right_mac = right_combo.get_active_id()
-        player = int(player_combo.get_active_id())
         dlg.destroy()
         if not left_mac or not right_mac:
             return
@@ -1104,21 +1094,14 @@ class MainWindow(Gtk.ApplicationWindow):
 
         def task() -> tuple[bool, str]:
             rc, out = run_ngc_config(
-                ["role", "--mac", left.mac, "--player", str(player), "--role", "left"],
-                restart=False,
+                ["combine", "--players", str(left.player), str(right.player)]
             )
-            if rc != 0:
-                return False, out[-1500:] if out else "Could not set left half."
-            rc, out = run_ngc_config(
-                ["role", "--mac", right.mac, "--player", str(player), "--role", "right"],
-                restart=True,
-            )
-            if rc != 0:
-                return False, out[-1500:] if out else "Could not set right half."
-            return True, (
-                f"Combined into one pad (Player {player}).\n\n"
-                "Bridge restarted — hold Sync on both halves to connect."
-            )
+            if rc == 0:
+                return True, (
+                    f"Combined into one pad (Player {min(left.player, right.player)}).\n\n"
+                    "Bridge restarted — hold Sync on both halves to connect."
+                )
+            return False, out[-1500:] if out else "Combine failed."
 
         self._run_task("Combining Joy-Cons", "Updating saved controllers…", task)
 
