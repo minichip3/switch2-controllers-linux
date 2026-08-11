@@ -82,73 +82,35 @@ GAMECUBE_BUTTON_MAP = {
     "R_STK": e.BTN_THUMBR,
 }
 
-# Solo Joy-Con 2 (Left). Every capability-minimizing approach tried before
-# this (declare only what the Left half physically has, in kernel
-# hid-nintendo's own evdev order) read correctly in Dolphin's raw evdev
-# view but got scrambled in Steam -- confirmed on real hardware, via
-# ~/.local/share/Steam/logs/controller.txt, that Steam has its own
-# built-in vendor-level special-casing for vendor 0x057e (Nintendo) that
-# forces a fixed "full Nintendo gamepad" capability *shape* and slot
-# layout onto any 057e device, regardless of what it actually declares or
-# what gamecontrollerdb.txt says. Fighting that (a neutral vendor ID)
-# works but throws away Steam's native Joy-Con glyphs/labels for nothing.
+# Solo Joy-Con 2 (Left), used standalone rather than snapped to a grip or
+# paired with its other half. Physically has no A/B/X/Y, right stick, PLUS,
+# HOME, or analog triggers -- those live on the Right half or the grip --
+# so this deliberately only covers what the Left half actually has, instead
+# of reusing PRO_BUTTON_MAP (which declared all of those as dead
+# capabilities and had no slot at all for SL/SR).
 #
-# This instead leans into it: declares the full 15-code BTN_GAMEPAD block
-# (same shape PRO_BUTTON_MAP/Pro Controller 2 already uses, which is
-# exactly why Pro Controller 2 never needed any of this) so evdev's sorted
-# button indices land on the *exact* slots Steam's forced template expects
-# (reverse-engineered from controller.txt's logged mapping for vendor
-# 057e): b6=leftshoulder, b7=rightshoulder, b10=back, b11=start,
-# b13=leftstick, dpad=Hat0X/Y. Everything else in the block (b0/1/3/4 face
-# buttons, b12 guide, b14 rightstick -- Left Joy-Con has none of these) is
-# declared but deliberately never driven, so it just sits dead the same
-# way it does on a real solo Joy-Con read through Steam's own native path.
-#
-# SL/SR reuse the block's "right side" shoulder slots (opposite-side reuse,
-# same idea as the kernel driver's own convention) since Left only has one
-# real left-side shoulder pair (L/ZL) but the block offers two full pairs.
-# ZL and SR don't get slots here at all -- b8/b9 (TL2/TR2) aren't
-# referenced by Steam's forced template (dead regardless of what's on
-# them), so they're driven as the *trigger axes* the template does use
-# (lefttrigger/righttrigger) instead -- see _DIGITAL_TRIGGER_AXES below.
-# CAPTURE goes to start (b11), not guide/BTN_MODE (b12) -- a real button on
-# BTN_MODE previously caused Steam to hijack the mouse cursor (see this
-# project's history), and b12 isn't needed for anything else here.
+# Slot choices mirror the upstream kernel `hid-nintendo` driver's
+# `left_joycon_button_mappings` (the "Joy-Con 1" convention) rather than
+# Steam Input's Joy-Con-2-specific SDL profile: SL/SR reuse the *opposite*
+# side's unused shoulder/trigger slots (SL->TR, SR->TR2) while this half's
+# own L/ZL take the same-side slots (L->TL, ZL->TL2); MINUS->SELECT,
+# CAPTURE->Z. D-pad is four discrete BTN_DPAD_* buttons, not a Hat0X/Y
+# axis -- also matching what the real driver sends, confirmed against
+# Steam's own device capability listing on real hardware (in exactly this
+# order: Z, TL, TR, TL2, TR2, SELECT, THUMBL, DPAD_UP/DOWN/LEFT/RIGHT, then
+# two plain stick axes, no hat).
 JOYCON2_LEFT_BUTTON_MAP = {
+    "CAPTURE": e.BTN_Z,
     "L": e.BTN_TL,
     "SL_L": e.BTN_TR,
+    "ZL": e.BTN_TL2,
+    "SR_L": e.BTN_TR2,
     "MINUS": e.BTN_SELECT,
-    "CAPTURE": e.BTN_START,
     "L_STK": e.BTN_THUMBL,
-}
-# D-pad goes out as Hat0X/Y (SwitchGamepad's existing hardcoded hat
-# emission, not this map -- see _DPAD_AS_BUTTONS below), matching Steam's
-# forced template (dpup/dpdown/dpleft/dpright:h0.*), not the discrete
-# BTN_DPAD_* buttons the kernel-convention approach used before.
-
-# Dead filler capabilities that exist purely to keep JOYCON2_LEFT_BUTTON_MAP's
-# real buttons landing on the right evdev-sorted indices (see the big
-# comment above) -- Left Joy-Con has none of these and they're never
-# written to.
-_JOYCON2_LEFT_SHAPE_FILLER_KEYS = (
-    e.BTN_SOUTH,  # b0 a
-    e.BTN_EAST,   # b1 b
-    e.BTN_C,      # b2 (unused by Steam's template)
-    e.BTN_WEST,   # b3 x
-    e.BTN_NORTH,  # b4 y
-    e.BTN_Z,      # b5 (unused by Steam's template)
-    e.BTN_TL2,    # b8 (unused by Steam's template -- ZL is a trigger axis instead)
-    e.BTN_TR2,    # b9 (unused by Steam's template -- SR is a trigger axis instead)
-    e.BTN_MODE,   # b12 guide -- deliberately left dead, see CAPTURE comment above
-    e.BTN_THUMBR, # b14 rightstick -- no right stick to click
-)
-
-# ZL/SR (BLE digital buttons) simulated as the analog trigger axes Steam's
-# forced template actually reads (lefttrigger:a2, righttrigger:a5) --
-# jumps between 0 and full-scale on press/release rather than a real analog
-# sweep, since there's no real analog sensor behind either button.
-_DIGITAL_TRIGGER_AXES = {
-    P.JOYCON2_LEFT_PID: {"ZL": e.ABS_Z, "SR_L": e.ABS_RZ},
+    "UP": e.BTN_DPAD_UP,
+    "DOWN": e.BTN_DPAD_DOWN,
+    "LEFT": e.BTN_DPAD_LEFT,
+    "RIGHT": e.BTN_DPAD_RIGHT,
 }
 
 # Tried advertising the real Nintendo Switch (1) Joy-Con (L) USB product ID
@@ -174,7 +136,7 @@ def uinput_product_id(product: int) -> int:
 # the old one. Ruled out on real hardware: controller.txt showed Steam
 # apply the exact same (wrong) auto-guessed mapping even for the brand new,
 # never-before-seen GUID -- not a caching issue after all (see
-# uinput_vendor_id() below for what actually was). Left in place
+# _UINPUT_VENDOR_OVERRIDES below for what actually was). Left in place
 # since it's harmless and does still get a fresh GUID for this pad.
 _UINPUT_VERSION_OVERRIDES = {P.JOYCON2_LEFT_PID: 0x0101}
 
@@ -183,14 +145,25 @@ def uinput_version(product: int) -> int:
     return _UINPUT_VERSION_OVERRIDES.get(product, 0x0100)
 
 
-# Tried a neutral, non-Nintendo vendor ID (0x1209, pid.codes) for this pad
-# to dodge Steam's vendor-057e special-casing entirely. Works, but throws
-# away Steam's native Joy-Con recognition/glyphs for nothing -- superseded
-# by leaning into that special-casing instead (see
-# JOYCON2_LEFT_BUTTON_MAP's doc comment and _JOYCON2_LEFT_SHAPE_FILLER_KEYS
-# below), which needs the real vendor ID to actually trigger.
+# The mapping Steam actually applied (per controller.txt) didn't match
+# JOYCON2_LEFT_BUTTON_MAP's real capabilities *at all* -- 4 face buttons, a
+# right stick, analog triggers, a d-pad hat -- none of which this device
+# declares. That mismatch was identical across two different SDL GUIDs
+# (ruling out a GUID-keyed cache) and identical to the generic "Nintendo
+# Switch Pro Controller"-shaped template, which points at Steam having its
+# own built-in vendor-level special-casing for vendor 0x057e (Nintendo)
+# that overrides gamecontrollerdb.txt/evdev capabilities entirely, separate
+# from -- and evaluated before -- the normal SDL_GameControllerDB path.
+# Advertising a neutral, non-Nintendo vendor ID for this pad avoids
+# triggering that path at all. 0x1209 is the pid.codes shared open-source/
+# hobbyist USB vendor ID (https://pid.codes) -- an accurate, honest choice
+# for a homebrew virtual device, not a random made-up number.
+_PIDCODES_VENDOR_ID = 0x1209
+_UINPUT_VENDOR_OVERRIDES = {P.JOYCON2_LEFT_PID: _PIDCODES_VENDOR_ID}
+
+
 def uinput_vendor_id(product: int) -> int:
-    return P.NINTENDO_VENDOR_ID
+    return _UINPUT_VENDOR_OVERRIDES.get(product, P.NINTENDO_VENDOR_ID)
 
 
 DEFAULT_BUTTON_MAP = PRO_BUTTON_MAP
@@ -206,20 +179,36 @@ def button_map_for_product(product_id: int) -> dict:
 
 
 class SwitchGamepad:
-    # Products that declare a right-stick pair (ABS_RX/RY). Solo Left
-    # Joy-Con is here now too, but faked/always-neutral -- see
-    # _FAKE_RIGHT_STICK -- purely so its capability shape matches what
-    # Steam's vendor-057e special-casing expects (see
-    # JOYCON2_LEFT_BUTTON_MAP's doc comment).
-    _HAS_RIGHT_STICK = {P.PRO_CONTROLLER2_PID, P.NSO_GAMECUBE_PID, P.JOYCON2_RIGHT_PID, P.JOYCON2_LEFT_PID}
-    # Solo Left Joy-Con has no real right stick to read -- always emit
-    # neutral (0, 0) regardless of whatever bridge.py happens to pass as
-    # right_stick for it (there's no real sensor behind that data).
-    _FAKE_RIGHT_STICK = {P.JOYCON2_LEFT_PID}
-    # GC: real analog L/R. Solo Left Joy-Con: ZL/SR simulated as digital
-    # 0/full-scale jumps -- see _DIGITAL_TRIGGER_AXES.
-    _HAS_TRIGGER_AXES = {P.NSO_GAMECUBE_PID, P.JOYCON2_LEFT_PID}
-    _DPAD_AS_BUTTONS: set[int] = set()  # nothing uses discrete BTN_DPAD_* anymore; all pads use Hat0X/Y
+    # Only the products in this set have a physical right stick / analog
+    # trigger pair -- everything else (a solo Joy-Con half) declaring those
+    # axes anyway just shows up as a permanently-centered phantom stick and
+    # dead trigger axes in Dolphin/Steam's device inspector.
+    _HAS_RIGHT_STICK = {P.PRO_CONTROLLER2_PID, P.NSO_GAMECUBE_PID, P.JOYCON2_RIGHT_PID}
+    _HAS_TRIGGER_AXES = {P.NSO_GAMECUBE_PID}  # only the GC pad has true analog L/R
+    # Solo Left Joy-Con sends its D-pad as four discrete buttons (see
+    # JOYCON2_LEFT_BUTTON_MAP), not a Hat0X/Y axis -- so it needs neither
+    # the hat capability nor the hardcoded hat emission in update()/
+    # release_all() below.
+    _DPAD_AS_BUTTONS = {P.JOYCON2_LEFT_PID}
+    # SDL's evdev joystick classifier (SDL_EVDEV_GuessDeviceClass, checked
+    # against actual SDL source) only sets ID_INPUT_JOYSTICK if, besides
+    # ABS_X/Y, the device has BTN_TRIGGER, BTN_A, BTN_1, or one of a handful
+    # of ABS axes (RX/RY/RZ/throttle/rudder/wheel/gas/brake) -- everything
+    # solo Left Joy-Con deliberately doesn't declare. A udev rule tagging
+    # ID_INPUT_JOYSTICK directly (system/udev/72-ngc-joystick.rules) was
+    # tried first instead of a dead capability here, on the theory that real
+    # Joy-Cons never hit this classifier at all (they're recognized through
+    # SDL's HIDAPI driver via raw VID/PID over hidraw, a completely
+    # different path we can't reach from a uinput device) -- but that alone
+    # didn't fix it on real hardware (Steam sandboxing/udev-database access
+    # is the likely reason: this classifier is a *process-local* ioctl bit
+    # check SDL does itself, not dependent on being able to read udev's
+    # database at all, so it's the more reliable fix regardless of what
+    # environment Steam is running in). BTN_TRIGGER is declared but never
+    # actually emitted (solo Joy-Con has no such button) purely to satisfy
+    # this check, chosen over BTN_A so a binding UI doesn't show it as a
+    # stuck-at-0 face button.
+    _NEEDS_SDL_JOYSTICK_HINT = {P.JOYCON2_LEFT_PID}
 
     def __init__(
         self,
@@ -230,15 +219,8 @@ class SwitchGamepad:
     ):
         self.button_map = button_map or DEFAULT_BUTTON_MAP
         keys = set(self.button_map.values())
-        keys.update(_JOYCON2_LEFT_SHAPE_FILLER_KEYS if product == P.JOYCON2_LEFT_PID else ())
-        self._digital_trigger_axes = _DIGITAL_TRIGGER_AXES.get(product, {})
-        self._fake_right_stick = product in self._FAKE_RIGHT_STICK
-        # SDL's evdev joystick classifier (SDL_EVDEV_GuessDeviceClass) needs
-        # ABS_X/Y plus BTN_TRIGGER/BTN_A/BTN_1 or a right-stick-ish axis --
-        # solo Left Joy-Con now declares BTN_SOUTH (BTN_A) as one of
-        # _JOYCON2_LEFT_SHAPE_FILLER_KEYS and a (faked) right stick, so it
-        # satisfies this on its own; no separate BTN_TRIGGER hint needed
-        # anymore.
+        if product in self._NEEDS_SDL_JOYSTICK_HINT:
+            keys.add(e.BTN_TRIGGER)
         keys = sorted(keys)
 
         self._has_right_stick = product in self._HAS_RIGHT_STICK
@@ -338,6 +320,8 @@ class SwitchGamepad:
         for key_code, pressed in key_states.items():
             changed |= self._emit_key(key_code, pressed)
 
+        # Left Joy-Con's D-pad already went out as BTN_DPAD_* above, via
+        # button_map -- it has no Hat0X/Y capability to write to.
         if not self._dpad_as_buttons:
             dpad_x = (1 if buttons & P.SWITCH_BUTTONS["RIGHT"] else 0) - (
                 1 if buttons & P.SWITCH_BUTTONS["LEFT"] else 0
@@ -354,18 +338,11 @@ class SwitchGamepad:
         changed |= self._emit_abs(e.ABS_X, self._scale_stick(lx))
         changed |= self._emit_abs(e.ABS_Y, -self._scale_stick(ly))
         if self._has_right_stick:
-            rx, ry = (0.0, 0.0) if self._fake_right_stick else right_stick
-            changed |= self._emit_abs(e.ABS_RX, self._scale_stick(rx))
-            changed |= self._emit_abs(e.ABS_RY, -self._scale_stick(ry))
+            changed |= self._emit_abs(e.ABS_RX, self._scale_stick(right_stick[0]))
+            changed |= self._emit_abs(e.ABS_RY, -self._scale_stick(right_stick[1]))
         if self._has_trigger_axes:
-            if self._digital_trigger_axes:
-                for switch_name, axis_code in self._digital_trigger_axes.items():
-                    mask = P.SWITCH_BUTTONS.get(switch_name, 0)
-                    value = 255 if (mask and buttons & mask) else 0
-                    changed |= self._emit_abs(axis_code, value)
-            else:
-                changed |= self._emit_abs(e.ABS_Z, max(0, min(255, left_trigger)))
-                changed |= self._emit_abs(e.ABS_RZ, max(0, min(255, right_trigger)))
+            changed |= self._emit_abs(e.ABS_Z, max(0, min(255, left_trigger)))
+            changed |= self._emit_abs(e.ABS_RZ, max(0, min(255, right_trigger)))
 
         if changed:
             self.ui.syn()
