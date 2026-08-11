@@ -45,7 +45,18 @@ logger = logging.getLogger(__name__)
 # Most adapters allow only ONE outstanding LE create-connection at a time.
 _CONNECT_LOCK = threading.Lock()
 _STATUS_INTERVAL_S = 1.5
-_SCAN_SETTLE_S = 0.10
+# Delay between our own BLE scan burst stopping and the first btmgmt/connect
+# call afterward. Real-hardware finding: sending an HCI/mgmt command while
+# our own prior radio activity (a pending connect, or -- this one -- our
+# own scan) hasn't fully settled stalls behind it on the same HCI command
+# queue for a real, measured ~1.5s (see _connect_dst_with_polling's doc
+# comment for the pending-connect case). The old 0.10s value predates that
+# finding and was too short to matter -- consistent with the connect right
+# after a scan burst failing almost every time on real hardware, succeeding
+# only once enough time had passed some other way (e.g. a later scan-loop
+# pass). 1.5s matches the measured settle cost directly instead of guessing
+# at a smaller number.
+_SCAN_SETTLE_S = 1.5
 # Time budget to poll ONE pending connect (one dst_type within one outer
 # attempt) before giving up on it -- see _connect_dst_with_polling, whose
 # doc comment covers the debug-instrumented real-hardware finding that
@@ -54,12 +65,13 @@ _SCAN_SETTLE_S = 0.10
 # pending stalls on the same HCI command queue as that pending connect).
 # Suppressed once before the connect starts and then left alone.
 _CONNECT_ATTEMPT_S = 3.0
-# Shorter budget for "wake" mode (see _connect_sync) -- real-hardware
-# testing showed "wake" reconnects failing consistently at 3.0s/dst_type
-# across many passes even after ruling out other causes, suggesting its
-# advertising window is tighter than "pairing" mode's; give up sooner per
-# dst_type so both tries have a better chance of landing inside it.
-_CONNECT_ATTEMPT_S_WAKE = 1.2
+# Tried a shorter budget for "wake" mode specifically here, on the theory
+# its advertising window was tighter than "pairing" mode's -- reverted,
+# 미니 confirmed the two modes' advertising windows are both ~10s, so that
+# wasn't the actual difference. The real pattern (per real-hardware
+# testing): the *first* connect attempt right after our own scan burst
+# fails almost every time, on both modes, and only a later pass (after our
+# own scan has had more time to settle) succeeds -- see _SCAN_SETTLE_S.
 # Each dst_type tried costs ~1.5s (HCI-queue tax) + up to _CONNECT_ATTEMPT_S
 # regardless of outcome (see _connect_dst_with_polling), and both types are
 # always tried (see _connect_sync -- skipping the non-hinted type turned
@@ -402,7 +414,7 @@ class _ConnectHub:
                         mode = hub._last_seen[mac][1]
                         try:
                             ok, detail = await hub._loop.run_in_executor(
-                                hub._executor, hub._connect_sync, mac, mode
+                                hub._executor, hub._connect_sync, mac
                             )
                         except Exception as exc:  # noqa: BLE001
                             ok, detail = False, str(exc)
@@ -451,23 +463,14 @@ class _ConnectHub:
             if hub._scanner is not None:
                 await hub._scanner.stop()
 
-    def _connect_sync(self, mac: str, mode: str = "wake") -> tuple[bool, str]:
+    def _connect_sync(self, mac: str) -> tuple[bool, str]:
         worker = self.workers_by_mac.get(mac)
         if worker is None or worker.is_connected():
             return False, "already connected"
         adapter = self.config.adapter_mac
         if not adapter:
             return False, "no adapter configured"
-        # "wake" advertisements (reconnect to a specific bonded host) appear
-        # to stop a good deal sooner than "pairing" ones do -- real-hardware
-        # testing showed "pairing" reconnects succeeding reliably with the
-        # full _CONNECT_ATTEMPT_S budget per dst_type, while "wake" ones
-        # kept failing the same way across many passes even after ruling out
-        # timing/HCI-queue and dst_type-hint bugs as the cause. A shorter
-        # per-dst_type budget for wake gives up faster per attempt, better
-        # odds of both dst_type tries landing inside whatever that window
-        # actually is instead of the second one always finding the pad gone.
-        attempt_s = _CONNECT_ATTEMPT_S_WAKE if mode == "wake" else _CONNECT_ATTEMPT_S
+        attempt_s = _CONNECT_ATTEMPT_S
         # Every dst_type tried costs a real ~1.5s HCI-queue tax on top of the
         # poll wait itself (see _connect_dst_with_polling), regardless of
         # whether it succeeds, so trying the previously-successful dst_type
