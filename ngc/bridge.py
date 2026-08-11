@@ -148,6 +148,35 @@ def _force_bt_inquiry_off(*, force: bool = False) -> None:
             pass
 
 
+def _set_bredr(enabled: bool) -> None:
+    """Toggle the adapter's BR/EDR (Classic Bluetooth) radio on/off.
+
+    btmon evidence on real hardware: bluetoothd restarts a fresh BR/EDR
+    Inquiry within ~3ms of every ``stop-find -b`` cancel completing --
+    not from any identifiable external client (Steam ruled out; killing
+    every candidate process didn't stop it either), so it looks like
+    bluetoothd's own internal behavior. No amount of re-cancelling wins
+    that race, so our raw LE L2CAP connects were spending nearly all of
+    their time with Inquiry active regardless of how often
+    _force_bt_inquiry_off() ran. Inquiry is a BR/EDR-only operation --
+    ngc only ever uses LE -- so turning BR/EDR off for the adapter makes
+    it structurally impossible for bluetoothd (or anything else) to run
+    an Inquiry at all, sidestepping the race entirely instead of trying
+    to win it.
+
+    Only meant to be held briefly around a connect attempt (see
+    _connect_sync) and always paired with a restore -- toggling BR/EDR
+    also affects any Classic Bluetooth devices on this adapter (e.g. a
+    BR/EDR keyboard), which may briefly drop while it's off.
+
+    Never raises.
+    """
+    _run_quiet(
+        ["sudo", "-n", "btmgmt", "-i", _adapter_index(), "bredr", "on" if enabled else "off"],
+        timeout=2.0,
+    )
+
+
 def _power_cycle_adapter() -> None:
     """Toggle adapter power to clear a wedged radio state.
 
@@ -447,22 +476,32 @@ class _ConnectHub:
         if not adapter:
             return False, "no adapter configured"
         with _CONNECT_LOCK:
-            last_detail = "no attempts"
-            for attempt in range(_CONNECT_ATTEMPTS):
-                ctrl = SwitchController(mac, adapter)
-                for dst in (att.LE_PUBLIC, att.LE_RANDOM):
-                    ok, detail = self._connect_dst_with_polling(ctrl, dst)
-                    if ok:
-                        ctrl.att.dst_type = dst
-                        if worker.activate(ctrl):
-                            worker._ready.set()
-                            return True, "ok"
-                        ctrl.close()
-                        return False, "session setup failed"
-                    last_detail = detail
-                ctrl.close()
-                time.sleep(0.02)
-            return False, last_detail
+            # Structurally prevent BR/EDR Inquiry (see _set_bredr) for the
+            # duration of this attempt sequence instead of racing to
+            # re-cancel it -- always restored in `finally`, including on
+            # early return, so Classic Bluetooth devices (keyboard, etc.)
+            # are only affected while an actual connect attempt is in
+            # flight, never left off.
+            _set_bredr(False)
+            try:
+                last_detail = "no attempts"
+                for attempt in range(_CONNECT_ATTEMPTS):
+                    ctrl = SwitchController(mac, adapter)
+                    for dst in (att.LE_PUBLIC, att.LE_RANDOM):
+                        ok, detail = self._connect_dst_with_polling(ctrl, dst)
+                        if ok:
+                            ctrl.att.dst_type = dst
+                            if worker.activate(ctrl):
+                                worker._ready.set()
+                                return True, "ok"
+                            ctrl.close()
+                            return False, "session setup failed"
+                        last_detail = detail
+                    ctrl.close()
+                    time.sleep(0.02)
+                return False, last_detail
+            finally:
+                _set_bredr(True)
 
     @staticmethod
     def _connect_dst_with_polling(ctrl: SwitchController, dst: int) -> tuple[bool, str]:
