@@ -94,6 +94,16 @@ _CONNECT_ATTEMPTS = 1
 # more generous 3.0s budget.
 _WAKE_CONNECT_ATTEMPT_S = 2.0
 
+# Scoped-power-cycle wedge detection. A handful of failed connect passes
+# while pairing/reconnecting is normal -- the pad's own advertising window
+# doesn't always line up with our poll -- so this must clear a much higher
+# bar than that before concluding the radio itself is wedged and not just
+# unlucky timing. Both floors below must be crossed, AND no worker anywhere
+# may currently be connected (a live session is never interrupted for this).
+_POWER_CYCLE_AFTER_FAILURES = 6
+_POWER_CYCLE_AFTER_S = 45.0
+_POWER_CYCLE_COOLDOWN_S = 60.0
+
 
 def _adapter_index() -> str:
     """Prefer hci0; allow override via NGC_HCI (e.g. '1')."""
@@ -227,8 +237,9 @@ def _teardown_radio(mac: str) -> None:
     to "only a power cycle" clear. Removing the BlueZ device ghost and
     giving the kernel a moment to finish the old association is the
     software-side equivalent of that recovery: per-pad, no adapter power
-    toggle, no impact on other Bluetooth devices. Manual BT toggle stays
-    the user's last-resort recovery for a genuinely wedged hub.
+    toggle, no impact on other Bluetooth devices. A genuinely wedged radio
+    (every pad still failing well past this) falls back to
+    _power_cycle_adapter() instead.
 
     Never raises.
     """
@@ -239,6 +250,34 @@ def _teardown_radio(mac: str) -> None:
         time.sleep(0.5)
     except Exception:  # noqa: BLE001
         pass
+
+
+def _power_cycle_adapter() -> None:
+    """Toggle this adapter's power (btmgmt, HCI-level) to clear a wedged
+    radio. Scoped to *this* adapter only -- no USB rebind, <1s of actual
+    power-off time -- so other Bluetooth devices sharing it see a brief
+    blip, not a real disconnect/reconnect cycle.
+
+    User-approved fallback (2026-08-12): pure software recovery
+    (_teardown_radio's per-pad BlueZ scrub, the InProgress-clearing retries,
+    the persisted dst_type hint) reduces how often connects miss the pad's
+    advertising window, but the underlying interference -- bluetoothd
+    restarting BR/EDR Inquiry during our connect poll -- was confirmed on a
+    second, unrelated machine/adapter during this investigation, so it's a
+    general BlueZ behavior, not something this host's software stack can
+    fully suppress. Only called when nothing is connected anywhere and
+    failures have persisted well past the normal "took a few tries" range
+    (see _POWER_CYCLE_AFTER_FAILURES/_S) -- there is no live session to
+    lose, and the cooldown (_POWER_CYCLE_COOLDOWN_S) keeps this from
+    tightlooping if the wedge doesn't clear on the first try.
+
+    Never raises.
+    """
+    idx = _adapter_index()
+    _run_quiet(["sudo", "-n", "btmgmt", "-i", idx, "power", "off"], timeout=3.0)
+    time.sleep(0.5)
+    _run_quiet(["sudo", "-n", "btmgmt", "-i", idx, "power", "on"], timeout=3.0)
+    time.sleep(1.5)
 
 
 def prepare_bluez_global() -> None:
@@ -330,6 +369,12 @@ class _ConnectHub:
         self._executor: Optional[concurrent.futures.ThreadPoolExecutor] = None
         self._hub_error = ""
         self._scanning = False
+        # Wedge-detection state for the scoped power-cycle fallback (see
+        # _power_cycle_adapter). Reset to zero/None on any successful
+        # connect; only consulted when nothing is connected anywhere.
+        self._wedge_fails = 0
+        self._wedge_since: Optional[float] = None
+        self._last_power_cycle = 0.0
 
     def register(self, worker: "_Worker") -> None:
         self.workers_by_mac[worker.entry.mac.upper()] = worker
@@ -515,14 +560,14 @@ class _ConnectHub:
                             logger.info("connected %s after %s advert", mac, mode)
                             hub._last_seen.pop(mac, None)
                             hub._logged.discard(mac)
+                            hub._wedge_fails = 0
+                            hub._wedge_since = None
                         else:
                             logger.info("connect to %s (%s) failed (%s)", mac, mode, detail)
                             _force_bt_inquiry_off(force=True)
-                            # No auto power cycle (user policy: a manual BT
-                            # toggle is the only wedge recovery). Instead,
-                            # scrub the radio/BlueZ side of this specific
-                            # pad so its next wake advertisement starts from
-                            # a clean state, and wait for that next
+                            # Scrub the radio/BlueZ side of this specific pad
+                            # so its next wake advertisement starts from a
+                            # clean state, and wait for that next
                             # advertisement -- the pad's own ~10s advertising
                             # window is the natural backoff. The failed pad
                             # is dropped from _last_seen so this pass doesn't
@@ -530,6 +575,36 @@ class _ConnectHub:
                             _teardown_radio(mac)
                             hub._last_seen.pop(mac, None)
                             hub._logged.discard(mac)
+
+                            hub._wedge_fails += 1
+                            if hub._wedge_since is None:
+                                hub._wedge_since = now
+                            nothing_connected = not any(
+                                w.is_connected() for w in hub.workers_by_mac.values()
+                            )
+                            if (
+                                nothing_connected
+                                and hub._wedge_fails >= _POWER_CYCLE_AFTER_FAILURES
+                                and (now - hub._wedge_since) >= _POWER_CYCLE_AFTER_S
+                                and (now - hub._last_power_cycle) >= _POWER_CYCLE_COOLDOWN_S
+                            ):
+                                logger.warning(
+                                    "reconnects failing repeatedly (%d fails over %.0fs) "
+                                    "with nothing connected; power-cycling adapter",
+                                    hub._wedge_fails, now - hub._wedge_since,
+                                )
+                                _power_cycle_adapter()
+                                hub._wedge_fails = 0
+                                hub._wedge_since = None
+                                hub._last_power_cycle = time.monotonic()
+                                hub._last_seen.clear()
+                                hub._logged.clear()
+                                # Adapter needs a moment to re-init; bail out
+                                # of this pass -- the scan loop will re-see
+                                # the pads on their next advertisement. Also
+                                # avoids the KeyError the cleared _last_seen
+                                # would cause on the next pending mac.
+                                break
 
                 for mac, (seen_at, _) in list(hub._last_seen.items()):
                     if now - seen_at > seen_ttl_s:
