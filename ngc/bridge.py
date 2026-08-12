@@ -62,17 +62,19 @@ _LAST_LE_SCAN_OFF = 0.0
 _LE_SCAN_OFF_MIN_INTERVAL_S = 0.35
 
 
-def _run_quiet(cmd: list[str], *, timeout: float = 2.0) -> None:
-    """Best-effort subprocess; never raises into the bridge."""
+def _run_quiet(cmd: list[str], *, timeout: float = 2.0) -> bool:
+    """Best-effort subprocess; never raises into the bridge. Returns True on
+    a zero exit status so callers that need to know can check it."""
     try:
-        subprocess.run(
+        result = subprocess.run(
             cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=timeout,
         )
+        return result.returncode == 0
     except Exception:  # noqa: BLE001
-        pass
+        return False
 
 
 def _force_le_scan_off(*, force: bool = False) -> None:
@@ -123,7 +125,7 @@ def _bluez_device_path(mac: str) -> str:
 _BLUEZ_BLOCKED: set[str] = set()
 
 
-def _bluez_set_blocked(mac: str, blocked: bool) -> None:
+def _bluez_set_blocked(mac: str, blocked: bool) -> bool:
     """Tell BlueZ a pad is handled by this bridge (Blocked=true) so
     bluetoothd / Steam Input / other D-Bus clients never race our raw ATT
     connect with their own connection attempt, or unblock it (false) so it
@@ -138,13 +140,13 @@ def _bluez_set_blocked(mac: str, blocked: bool) -> None:
     this flag, so our own connects and the raw pairing/rebond handshake are
     unaffected; only BlueZ-mediated connects (Steam, bluetoothctl) are.
 
-    Never raises.
+    Never raises. Returns whether the D-Bus call actually succeeded (fails
+    e.g. while BlueZ hasn't created the Device1 object for this mac yet).
     """
     if not mac:
-        return
-    _run_quiet(
-        ["busctl", "call", "org.bluez", _bluez_device_path(mac),
-         "org.freedesktop.DBus.Properties", "Set",
+        return False
+    return _run_quiet(
+        ["busctl", "set-property", "org.bluez", _bluez_device_path(mac),
          "org.bluez.Device1", "Blocked", "b", "true" if blocked else "false"],
         timeout=1.5,
     )
@@ -153,11 +155,14 @@ def _bluez_set_blocked(mac: str, blocked: bool) -> None:
 def _ensure_bluez_blocked(mac: str) -> None:
     """Idempotent per-process version of _bluez_set_blocked(True): avoids
     re-issuing the D-Bus call on every advertisement for an already-blocked
-    pad. Safe to call from the scan callback (cheap after the first call)."""
+    pad. Safe to call from the scan callback (cheap after the first call).
+    Only marks the mac as done once the D-Bus call actually succeeds, so a
+    failed attempt (e.g. Device1 object not registered yet) gets retried on
+    the next advertisement instead of being silently forgotten."""
     if not mac or mac in _BLUEZ_BLOCKED:
         return
-    _bluez_set_blocked(mac, True)
-    _BLUEZ_BLOCKED.add(mac)
+    if _bluez_set_blocked(mac, True):
+        _BLUEZ_BLOCKED.add(mac)
 
 
 def _bluez_unblock(mac: str) -> None:
