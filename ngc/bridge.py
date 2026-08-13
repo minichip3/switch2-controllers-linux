@@ -58,8 +58,8 @@ def _adapter_index() -> str:
 
 
 _BTMGMT_LOCK = threading.Lock()
-_LAST_BT_DISCOVERY_OFF = 0.0
-_BT_DISCOVERY_OFF_MIN_INTERVAL_S = 0.35
+_LAST_LE_SCAN_OFF = 0.0
+_LE_SCAN_OFF_MIN_INTERVAL_S = 0.35
 
 
 def _run_quiet(cmd: list[str], *, timeout: float = 2.0) -> bool:
@@ -77,29 +77,28 @@ def _run_quiet(cmd: list[str], *, timeout: float = 2.0) -> bool:
         return False
 
 
-def _force_bt_discovery_off(*, force: bool = False) -> None:
-    """HCI-level discovery stop for both BR/EDR and LE (btmgmt stop-find).
+def _force_le_scan_off(*, force: bool = False) -> None:
+    """HCI-level LE discovery stop.
 
-    btmgmt stop-find (without -b or -l) stops both BR/EDR Inquiry and LE
-    scan in a single HCI command, avoiding the queue contention of calling
-    two separate btmgmt commands.
-
-    BlueZ D-Bus StopDiscovery only ends *our* session; Steam/Decky can hold
-    the adapter's LE discovery. btmgmt clears HCI-level discovery regardless
-    of who started it. Requires passwordless sudo for btmgmt.
+    BlueZ ``StopDiscovery`` only ends *our* session. Steam/steamos-manager keeps
+    its own session forever (``Discovering`` stays true), which blocks raw L2CAP
+    create-connection. ``btmgmt stop-find -l`` stops the controller's LE scan
+    regardless of who started it. Requires passwordless ``sudo`` for btmgmt
+    (Bazzite default for this user).
 
     Never raises — a hung btmgmt must not crash the bridge.
     """
-    global _LAST_BT_DISCOVERY_OFF
+    global _LAST_LE_SCAN_OFF
     now = time.monotonic()
     with _BTMGMT_LOCK:
-        if not force and (now - _LAST_BT_DISCOVERY_OFF) < _BT_DISCOVERY_OFF_MIN_INTERVAL_S:
+        if not force and (now - _LAST_LE_SCAN_OFF) < _LE_SCAN_OFF_MIN_INTERVAL_S:
             return
-        _LAST_BT_DISCOVERY_OFF = now
+        _LAST_LE_SCAN_OFF = now
         idx = _adapter_index()
+        # Start detached-ish: kill hung btmgmt so we never block the hub.
         try:
             proc = subprocess.Popen(
-                ["sudo", "-n", "btmgmt", "-i", idx, "stop-find"],
+                ["sudo", "-n", "btmgmt", "-i", idx, "stop-find", "-l"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -208,7 +207,7 @@ def prepare_bluez_global() -> None:
          "org.bluez.Adapter1", "StopDiscovery"],
         timeout=1.5,
     )
-    _force_bt_discovery_off(force=True)
+    _force_le_scan_off(force=True)
 
 
 def prepare_bluez(mac: str = "", *, remove: bool = False) -> None:
@@ -301,9 +300,9 @@ class _ConnectHub:
         worker = self.workers_by_mac.get(addr)
         if worker is None or worker.is_connected():
             return False
-        # Allow wake-mode advertisements even if reconnect MAC doesn't match
-        # our adapter — the controller will accept our raw LE connection
-        # regardless of which bonded host it's trying to reconnect to.
+        reconnect = P.reconnect_mac_from_advertisement(adv)
+        if reconnect is not None and self.host_mac is not None and reconnect not in (0, self.host_mac):
+            return False
         return True
 
     def _run_async(self) -> None:
@@ -409,7 +408,7 @@ class _ConnectHub:
                             hub._logged.discard(mac)
                         else:
                             logger.info("connect to %s (%s) failed (%s)", mac, mode, detail)
-                            _force_bt_discovery_off(force=True)
+                            _force_le_scan_off(force=True)
 
                 for mac, (seen_at, _) in list(hub._last_seen.items()):
                     if now - seen_at > seen_ttl_s:
@@ -430,11 +429,11 @@ class _ConnectHub:
         if not adapter:
             return False, "no adapter configured"
         with _CONNECT_LOCK:
-            _force_bt_discovery_off(force=True)
+            _force_le_scan_off()
             last_detail = "no attempts"
             for attempt in range(_CONNECT_ATTEMPTS):
                 if attempt and attempt % 4 == 0:
-                    _force_bt_discovery_off(force=True)
+                    _force_le_scan_off()
                 ctrl = SwitchController(mac, adapter)
                 for dst in (att.LE_PUBLIC, att.LE_RANDOM):
                     ok, detail = ctrl.att._connect_once(dst, _CONNECT_ATTEMPT_S)
