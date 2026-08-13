@@ -15,11 +15,20 @@ busctl call org.bluez /org/bluez/hci0 org.bluez.Adapter1 StopDiscovery >/dev/nul
 
 # Steam owns a permanent discovery session; StopDiscovery can't clear it.
 # btmgmt stop-find -b stops the BR/EDR Inquiry (the real interference -- see
-# ngc/bridge.py _force_bt_inquiry_off) at the HCI layer.
+# ngc/bridge.py _force_bt_inquiry_off) at the HCI layer. Also stop-find -l
+# (LE scan) so Bazzite environments that leave an LE discovery session
+# running (e.g. decky-bluetooth-wake-control racing with Steam Input) don't
+# keep grabbing the adapter right after we clear BR/EDR discovery.
 if sudo -n btmgmt -i 0 stop-find -b >/dev/null 2>&1; then
   echo "BR/EDR Inquiry stopped (btmgmt stop-find -b)"
 else
   echo "warn: could not run 'sudo -n btmgmt -i 0 stop-find -b' (needed for reliable S2 connects)" >&2
+fi
+
+if sudo -n btmgmt -i 0 stop-find -l >/dev/null 2>&1; then
+  echo "LE scan stopped (btmgmt stop-find -l)"
+else
+  echo "warn: could not run 'sudo -n btmgmt -i 0 stop-find -l' (needed for reliable S2 connects)" >&2
 fi
 
 if [[ -n "$MAC" ]]; then

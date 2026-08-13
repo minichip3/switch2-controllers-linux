@@ -1082,7 +1082,10 @@ class Bridge:
         with self._reorder_lock:
             if self._reorder_timer is not None:
                 self._reorder_timer.cancel()
-            self._reorder_timer = threading.Timer(2.0, run_emulator_reorder)
+            # 15s (was 2s): on Bazzite, firing this right after connect races
+            # bazzite-eden-reset-controllers.py, which drops the controller it
+            # just connected. Give the link time to settle first.
+            self._reorder_timer = threading.Timer(15.0, run_emulator_reorder)
             self._reorder_timer.daemon = True
             self._reorder_timer.start()
 
