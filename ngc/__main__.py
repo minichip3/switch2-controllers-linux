@@ -203,11 +203,15 @@ def _combine(
     """
     ca = cfg.find_by_player(player_a)
     cb = cfg.find_by_player(player_b)
-    if (ca and ca.pair_role) or (cb and cb.pair_role):
-        print(f"Could not combine: P{player_a} or P{player_b} is already half of a pair — uncombine it first.")
-        return 1
     if not ca or not cb:
         print(f"Could not combine: need a saved controller on both P{player_a} and P{player_b}.")
+        return 1
+    # Already combined if another controller shares the same player slot
+    if any(e.player == ca.player and e.mac != ca.mac for e in cfg.entries()):
+        print(f"Could not combine: P{player_a} is already half of a pair — uncombine it first.")
+        return 1
+    if any(e.player == cb.player and e.mac != cb.mac for e in cfg.entries()):
+        print(f"Could not combine: P{player_b} is already half of a pair — uncombine it first.")
         return 1
     role_a = ca.pair_role
     role_b = cb.pair_role

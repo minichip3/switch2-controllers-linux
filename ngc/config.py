@@ -194,20 +194,17 @@ class Config:
         mac = mac.upper()
         entries = self.entries()
         target = next((e for e in entries if e.mac.upper() == mac), None)
-        if not target or not target.pair_role:
-            return None
         mate = next(
             (e for e in entries
-             if e.mac.upper() != mac and e.player == target.player and e.pair_role),
+             if e.mac.upper() != mac and e.player == target.player),
             None,
         )
+        if not mate:
+            return None
         for c in self.controllers:
-            if c["mac"].upper() == mac:
-                c["pair_role"] = None
-            elif mate and c["mac"].upper() == mate.mac.upper():
-                c["pair_role"] = None
-                # The target keeps its slot; the mate needs a free one. `used`
-                # already includes the target's player, so no exclude needed.
+            if mate and c["mac"].upper() == mate.mac.upper():
+                # Preserve left/right side info; just assign a new player slot.
+                # `used` already includes the target's player, so no exclude needed.
                 c["player"] = self._next_free_player() or target.player
         return self.entries()
 
@@ -238,9 +235,10 @@ class Config:
             raise ValueError("players A and B must be different slots")
         ca = self.find_by_player(player_a)
         cb = self.find_by_player(player_b)
-        if ca and ca.pair_role:
+        # Check if already combined (shares player slot with another controller)
+        if any(e.player == ca.player and e.mac != ca.mac for e in self.entries()):
             raise ValueError(f"P{player_a} is already half of a pair — uncombine it first")
-        if cb and cb.pair_role:
+        if any(e.player == cb.player and e.mac != cb.mac for e in self.entries()):
             raise ValueError(f"P{player_b} is already half of a pair — uncombine it first")
         if not ca or not cb:
             raise ValueError(f"need a saved controller on both P{player_a} and P{player_b}")
