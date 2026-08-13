@@ -91,9 +91,8 @@ def _adapter_index() -> str:
 
 
 _BTMGMT_LOCK = threading.Lock()
-_LAST_BT_INQUIRY_OFF = 0.0
-_LAST_BT_LE_SCAN_OFF = 0.0
-_BT_INQUIRY_OFF_MIN_INTERVAL_S = 0.35
+_LAST_BT_DISCOVERY_OFF = 0.0
+_BT_DISCOVERY_OFF_MIN_INTERVAL_S = 0.35
 
 # Consecutive failed connect passes for a pad -- whether or not it has ever
 # connected in this process -- before we power-cycle the adapter (see
@@ -116,73 +115,32 @@ def _run_quiet(cmd: list[str], *, timeout: float = 2.0) -> None:
         pass
 
 
-def _force_bt_inquiry_off(*, force: bool = False) -> None:
-    """HCI-level BR/EDR Inquiry stop.
+def _force_bt_discovery_off(*, force: bool = False) -> None:
+    """HCI-level discovery stop for both BR/EDR and LE (btmgmt stop-find).
 
-    Real-hardware root cause (same host, sibling joyfusion project's btmon
-    investigation): the interference that blocks raw L2CAP connect here was
-    never an *LE* scan despite this function's old name and old ``-l`` flag
-    -- bluetoothd (or something upstream; every external client candidate
-    was ruled out there) restarts ordinary BR/EDR ``Inquiry`` back-to-back,
-    a fresh one firing within ~1s of the previous ``Inquiry Complete``.
-    ``btmgmt stop-find -l`` against BR/EDR discovery returns "Invalid
-    Parameters" instantly (a type mismatch), which is exactly why the old
-    flag silently never helped. ``-b`` actually stops it (``Discovering``
-    flips to ``no``), just not for long, so callers keep re-calling this
-    around connect attempts (see _connect_sync).
+    btmgmt stop-find (without -b or -l) stops both BR/EDR Inquiry and LE
+    scan in a single HCI command, avoiding the queue contention of calling
+    two separate btmgmt commands.
 
-    BlueZ's D-Bus ``StopDiscovery`` only ends *our* session; ``btmgmt``
-    clears the HCI-level discovery regardless of who started it. Requires
-    passwordless ``sudo`` for btmgmt (Bazzite default for this user).
+    Real-hardware root cause: bluetoothd restarts BR/EDR Inquiry back-to-back
+    (~1s between Inquiry Complete and next Inquiry), and Steam Input / Decky
+    can hold the adapter's LE discovery. btmgmt clears HCI-level discovery
+    regardless of who started it, while BlueZ D-Bus StopDiscovery only ends
+    *our* session.
 
-    Never raises — a hung btmgmt must not crash the bridge.
+    Requires passwordless sudo for btmgmt. Never raises — a hung btmgmt
+    must not crash the bridge.
     """
-    global _LAST_BT_INQUIRY_OFF
+    global _LAST_BT_DISCOVERY_OFF
     now = time.monotonic()
     with _BTMGMT_LOCK:
-        if not force and (now - _LAST_BT_INQUIRY_OFF) < _BT_INQUIRY_OFF_MIN_INTERVAL_S:
+        if not force and (now - _LAST_BT_DISCOVERY_OFF) < _BT_DISCOVERY_OFF_MIN_INTERVAL_S:
             return
-        _LAST_BT_INQUIRY_OFF = now
-        idx = _adapter_index()
-        # Start detached-ish: kill hung btmgmt so we never block the hub.
-        try:
-            proc = subprocess.Popen(
-                ["sudo", "-n", "btmgmt", "-i", idx, "stop-find", "-b"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            try:
-                proc.wait(timeout=1.5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                try:
-                    proc.wait(timeout=0.5)
-                except Exception:  # noqa: BLE001
-                    pass
-        except Exception:  # noqa: BLE001
-            pass
-
-
-def _force_bt_le_scan_off(*, force: bool = False) -> None:
-    """HCI-level LE scan stop (btmgmt stop-find -l).
-
-    D-Bus StopDiscovery only ends *our* session, so when another client
-    (Steam Input, decky-bluetooth-wake-control) holds the adapter's LE
-    discovery and our scanner.start() gets [org.bluez.Error.InProgress],
-    btmgmt is the only way to clear it at the HCI level. Uses its own
-    throttle so it is not skipped when called right after _force_bt_inquiry_off.
-    Never raises.
-    """
-    global _LAST_BT_LE_SCAN_OFF
-    now = time.monotonic()
-    with _BTMGMT_LOCK:
-        if not force and (now - _LAST_BT_LE_SCAN_OFF) < _BT_INQUIRY_OFF_MIN_INTERVAL_S:
-            return
-        _LAST_BT_LE_SCAN_OFF = now
+        _LAST_BT_DISCOVERY_OFF = now
         idx = _adapter_index()
         try:
             proc = subprocess.Popen(
-                ["sudo", "-n", "btmgmt", "-i", idx, "stop-find", "-l"],
+                ["sudo", "-n", "btmgmt", "-i", idx, "stop-find"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -257,8 +215,7 @@ def prepare_bluez_global() -> None:
          "org.bluez.Adapter1", "StopDiscovery"],
         timeout=1.5,
     )
-    _force_bt_inquiry_off(force=True)
-    _force_bt_le_scan_off(force=True)
+    _force_bt_discovery_off(force=True)
 
 
 def prepare_bluez(mac: str = "", *, remove: bool = False) -> None:
@@ -351,9 +308,9 @@ class _ConnectHub:
         worker = self.workers_by_mac.get(addr)
         if worker is None or worker.is_connected():
             return False
-        reconnect = P.reconnect_mac_from_advertisement(adv)
-        if reconnect is not None and self.host_mac is not None and reconnect not in (0, self.host_mac):
-            return False
+        # Allow wake-mode advertisements even if reconnect MAC doesn't match
+        # our adapter — the controller will accept our raw LE connection
+        # regardless of which bonded host it's trying to reconnect to.
         return True
 
     def _run_async(self) -> None:
@@ -387,7 +344,6 @@ class _ConnectHub:
                         # the adapter's LE discovery; clear it at HCI level so
                         # the retry has a chance instead of crash-looping.
                         prepare_bluez_global()
-                        _force_bt_le_scan_off(force=True)
                     time.sleep(backoff)
                     backoff = min(backoff * 2, 30.0)
         finally:
@@ -447,7 +403,6 @@ class _ConnectHub:
                             raise
                         hub._scanning = False
                         prepare_bluez_global()
-                        _force_bt_le_scan_off(force=True)
                         logger.warning(
                             "LE scan held by another client; cleared, retry %d/3",
                             scan_attempt,
@@ -516,7 +471,7 @@ class _ConnectHub:
                             hub._logged.discard(mac)
                         else:
                             logger.info("connect to %s (%s) failed (%s)", mac, mode, detail)
-                            _force_bt_inquiry_off(force=True)
+                            _force_bt_discovery_off(force=True)
                             # Not gated on worker.ever_connected -- a radio
                             # that's wedged before this process ever
                             # connected anything needs the same recovery a
@@ -618,7 +573,7 @@ class _ConnectHub:
         a multi-second wait clear. Debug-instrumented on real hardware and
         disproven: each individual select() poll returned in exactly its
         requested time (no bug there), but a ~1.5s gap appeared *between*
-        polls -- right where the per-poll _force_bt_inquiry_off() call sits.
+        polls -- right where the per-poll _force_bt_discovery_off() call sits.
         Sending a btmgmt command while our own LE Create Connection is
         already pending apparently has to wait on the same HCI command queue
         as that pending connect, so re-suppressing mid-wait was costing
@@ -627,12 +582,10 @@ class _ConnectHub:
         alone for the whole wait avoids that self-inflicted stall -- even
         though Inquiry may creep back in before this wait ends.
         """
-        # Stop both BR/EDR and LE discovery right before connecting.
+        # Stop discovery right before connecting.
         # Do NOT call btmgmt during polling — it stalls the pending connect
-        # on the HCI command queue. Call LE scan off first (it shares the
-        # same HCI queue), then inquiry off last so it's the most recent.
-        _force_bt_le_scan_off(force=True)
-        _force_bt_inquiry_off(force=True)
+        # on the HCI command queue.
+        _force_bt_discovery_off(force=True)
         s, err = ctrl.att._start_connect(dst)
         if s is None:
             return False, err
