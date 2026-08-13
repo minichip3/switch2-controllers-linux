@@ -277,16 +277,6 @@ def merge_state_with_pads(state: dict | None, pads: list[PadStatus]) -> list[Pad
     return merged
 
 
-def _infer_role(name: str) -> str | None:
-    """Guess which Joy-Con 2 half a saved controller is, from its name."""
-    n = (name or "").lower()
-    if "left" in n or "(l)" in n:
-        return "left"
-    if "right" in n or "(r)" in n:
-        return "right"
-    return None
-
-
 def group_pads(pads: list[PadStatus]) -> list[list[PadStatus]]:
     """Group the two halves of a combined pair (same player, complementary
     roles) into one row; everything else stays a single row."""
@@ -1071,7 +1061,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
         checks: list[tuple[Gtk.CheckButton, PadStatus]] = []
         for p in candidates:
-            side = _infer_role(p.name)
+            side = p.pair_role
             badge = f" ({side})" if side else " (side unknown)"
             check = Gtk.CheckButton(label=f"{p.name} (P{p.player}){badge}")
             check.set_halign(Gtk.Align.START)
@@ -1090,8 +1080,8 @@ class MainWindow(Gtk.ApplicationWindow):
         for c, _ in checks:
             c.connect("toggled", refresh)
         # Default: the two inferred-complementary halves if present, else first two.
-        lefts = [p for p in candidates if _infer_role(p.name) == "left"]
-        rights = [p for p in candidates if _infer_role(p.name) == "right"]
+        lefts = [p for p in candidates if p.pair_role == "left"]
+        rights = [p for p in candidates if p.pair_role == "right"]
         if lefts and rights:
             for c, p in checks:
                 c.set_active(p.mac in (lefts[0].mac, rights[0].mac))

@@ -56,7 +56,7 @@ def _bond_sync(mac: str, player: int, adapter: str) -> bool:
 
 
 async def _pair(
-    cfg: Config, timeout: float, player: int | None = None, role: str | None = None
+    cfg: Config, timeout: float, player: int | None = None
 ) -> bool:
     from .scanner import find_first
 
@@ -68,21 +68,20 @@ async def _pair(
     if not found:
         print("No controller found in pairing mode.")
         return False
-    if role and found.product_id not in (P.JOYCON2_LEFT_PID, P.JOYCON2_RIGHT_PID):
-        print(f"--role only applies to a solo Joy-Con 2 half, not {found.name}.")
-        return False
     if not cfg.adapter_mac:
         from .config import detect_adapter
 
         cfg.adapter_mac = detect_adapter()
-    # --role left/right combines this Joy-Con 2 half with its other half into
-    # one P<player> pad instead of giving it a player slot of its own: pair
-    # the left half with `ngc pair --player 1 --role left`, then the right
-    # half with `ngc pair --player 1 --role right`.
-    entry = cfg.add_controller(found.device.address, name=found.name, player=player, pair_role=role)
+    # Auto-detect Joy-Con 2 half role from product ID
+    pair_role = None
+    if found.product_id == P.JOYCON2_LEFT_PID:
+        pair_role = "left"
+    elif found.product_id == P.JOYCON2_RIGHT_PID:
+        pair_role = "right"
+    entry = cfg.add_controller(found.device.address, name=found.name, player=player, pair_role=pair_role)
     cfg.save()
-    if role:
-        print(f"Discovered {found.name} ({role}) at {entry.mac} (player {entry.player}); bonding...")
+    if pair_role:
+        print(f"Discovered {found.name} ({pair_role}) at {entry.mac} (player {entry.player}); bonding...")
     else:
         print(f"Discovered {found.name} at {entry.mac} (player {entry.player}); bonding...")
     ok = await asyncio.get_event_loop().run_in_executor(
@@ -189,16 +188,6 @@ def _role(cfg: Config, mac: str, player: int, role: str) -> int:
     return 0
 
 
-def _infer_role(name: str) -> str | None:
-    """Guess which Joy-Con 2 half a saved controller is, from its name."""
-    n = (name or "").lower()
-    if "left" in n or "(l)" in n:
-        return "left"
-    if "right" in n or "(r)" in n:
-        return "right"
-    return None
-
-
 def _combine(
     cfg: Config,
     player_a: int,
@@ -220,14 +209,14 @@ def _combine(
     if not ca or not cb:
         print(f"Could not combine: need a saved controller on both P{player_a} and P{player_b}.")
         return 1
-    role_a, role_b = _infer_role(ca.name), _infer_role(cb.name)
+    role_a = ca.pair_role
+    role_b = cb.pair_role
     if not role_a or not role_b:
         unknown = [e.name or e.mac for e, r in ((ca, role_a), (cb, role_b)) if not r]
         print(
-            "Could not combine: can't tell which half is left/right for "
+            f"Could not combine: missing left/right role for "
             + ", ".join(unknown)
-            + ". Set the roles manually: ngc role --mac X --player N --role left"
-            " (and --role right for the other half)."
+            + ". Use 'ngc role --mac X --player N --role left' to set."
         )
         return 1
     if role_a == role_b:
@@ -290,7 +279,7 @@ def main(argv=None) -> int:
     parser.add_argument("--player", type=int, help="player slot 1-8 (for pair / uncombine)")
     parser.add_argument(
         "--role", choices=["left", "right"],
-        help="combine this Joy-Con 2 half with its other half into one player pad (for pair/role)",
+        help="set Joy-Con 2 half role (for role command)",
     )
     parser.add_argument("--players", nargs=2, type=int, metavar=("A", "B"), help="player slots (for swap / combine / uncombine)")
     parser.add_argument("--target", type=int, metavar="N", help="player slot for the combined pair (combine; default: lower of A/B)")
@@ -300,7 +289,7 @@ def main(argv=None) -> int:
     cfg = Config.load()
 
     if args.command == "pair":
-        return 0 if asyncio.run(_pair(cfg, args.timeout, args.player, args.role)) else 1
+        return 0 if asyncio.run(_pair(cfg, args.timeout, args.player)) else 1
 
     if args.command == "rebond":
         return 0 if asyncio.run(_rebond(cfg, args.timeout)) else 1
