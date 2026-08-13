@@ -199,7 +199,7 @@ def _combine(
     The left/right roles are inferred from each pad's name, so the player
     order doesn't matter (`combine --players 1 2` == `2 1`). Config-only,
     like `swap` -- no Bluetooth involved. The pair takes the lower slot
-    (or --target N).
+    (or --player N).
     """
     ca = cfg.find_by_player(player_a)
     cb = cfg.find_by_player(player_b)
@@ -280,13 +280,12 @@ def main(argv=None) -> int:
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--timeout", type=float, default=30.0, help="pairing scan timeout")
     parser.add_argument("--mac", help="controller MAC (for remove)")
-    parser.add_argument("--player", type=int, help="player slot 1-8 (for pair / uncombine)")
+    parser.add_argument("--player", type=int, help="player slot 1-8 (for pair / combine / uncombine)")
     parser.add_argument(
         "--role", choices=["left", "right"],
         help="set Joy-Con 2 half role (for role command)",
     )
     parser.add_argument("--players", nargs=2, type=int, metavar=("A", "B"), help="player slots (for swap / combine / uncombine)")
-    parser.add_argument("--target", type=int, metavar="N", help="player slot for the combined pair (combine; default: lower of A/B)")
     args = parser.parse_args(argv)
     _setup_logging(args.verbose)
 
@@ -316,7 +315,7 @@ def main(argv=None) -> int:
 
     if args.command == "combine":
         a, b = (args.players if args.players else (1, 2))
-        return _combine(cfg, a, b, target_player=args.target)
+        return _combine(cfg, a, b, target_player=args.player)
 
     if args.command == "uncombine":
         if not args.mac and args.player is None:
