@@ -92,6 +92,7 @@ def _adapter_index() -> str:
 
 _BTMGMT_LOCK = threading.Lock()
 _LAST_BT_INQUIRY_OFF = 0.0
+_LAST_BT_LE_SCAN_OFF = 0.0
 _BT_INQUIRY_OFF_MIN_INTERVAL_S = 0.35
 
 # Consecutive failed connect passes for a pad -- whether or not it has ever
@@ -162,21 +163,22 @@ def _force_bt_inquiry_off(*, force: bool = False) -> None:
             pass
 
 
-def _force_bt_le_scan_off() -> None:
+def _force_bt_le_scan_off(*, force: bool = False) -> None:
     """HCI-level LE scan stop (btmgmt stop-find -l).
 
     D-Bus StopDiscovery only ends *our* session, so when another client
     (Steam Input, decky-bluetooth-wake-control) holds the adapter's LE
     discovery and our scanner.start() gets [org.bluez.Error.InProgress],
-    btmgmt is the only way to clear it at the HCI level. Shares the
-    btmgmt lock/throttle with _force_bt_inquiry_off. Never raises.
+    btmgmt is the only way to clear it at the HCI level. Uses its own
+    throttle so it is not skipped when called right after _force_bt_inquiry_off.
+    Never raises.
     """
-    global _LAST_BT_INQUIRY_OFF
+    global _LAST_BT_LE_SCAN_OFF
     now = time.monotonic()
     with _BTMGMT_LOCK:
-        if (now - _LAST_BT_INQUIRY_OFF) < _BT_INQUIRY_OFF_MIN_INTERVAL_S:
+        if not force and (now - _LAST_BT_LE_SCAN_OFF) < _BT_INQUIRY_OFF_MIN_INTERVAL_S:
             return
-        _LAST_BT_INQUIRY_OFF = now
+        _LAST_BT_LE_SCAN_OFF = now
         idx = _adapter_index()
         try:
             proc = subprocess.Popen(
@@ -256,13 +258,7 @@ def prepare_bluez_global() -> None:
         timeout=1.5,
     )
     _force_bt_inquiry_off(force=True)
-    _force_bt_le_scan_off()
-
-    # Note: do NOT power-cycle here. prepare_bluez_global is called per-pad
-    # during reconnects; power-cycling the adapter would drop the OTHER
-    # pad's live connection, causing a ping-pong disconnect loop. The hub
-    # already handles full adapter power-cycling when ALL pads have failed
-    # to reconnect (see _RECONNECT_FAILURES_BEFORE_POWER_CYCLE).
+    _force_bt_le_scan_off(force=True)
 
 
 def prepare_bluez(mac: str = "", *, remove: bool = False) -> None:
@@ -391,7 +387,7 @@ class _ConnectHub:
                         # the adapter's LE discovery; clear it at HCI level so
                         # the retry has a chance instead of crash-looping.
                         prepare_bluez_global()
-                        _force_bt_le_scan_off()
+                        _force_bt_le_scan_off(force=True)
                     time.sleep(backoff)
                     backoff = min(backoff * 2, 30.0)
         finally:
@@ -451,7 +447,7 @@ class _ConnectHub:
                             raise
                         hub._scanning = False
                         prepare_bluez_global()
-                        _force_bt_le_scan_off()
+                        _force_bt_le_scan_off(force=True)
                         logger.warning(
                             "LE scan held by another client; cleared, retry %d/3",
                             scan_attempt,
@@ -631,7 +627,12 @@ class _ConnectHub:
         alone for the whole wait avoids that self-inflicted stall -- even
         though Inquiry may creep back in before this wait ends.
         """
-        _force_bt_inquiry_off()
+        # Stop both BR/EDR and LE discovery right before connecting.
+        # Do NOT call btmgmt during polling — it stalls the pending connect
+        # on the HCI command queue. Call LE scan off first (it shares the
+        # same HCI queue), then inquiry off last so it's the most recent.
+        _force_bt_le_scan_off(force=True)
+        _force_bt_inquiry_off(force=True)
         s, err = ctrl.att._start_connect(dst)
         if s is None:
             return False, err
