@@ -46,43 +46,11 @@ logger = logging.getLogger(__name__)
 # Most adapters allow only ONE outstanding LE create-connection at a time.
 _CONNECT_LOCK = threading.Lock()
 _STATUS_INTERVAL_S = 1.5
-# Delay between our own BLE scan burst stopping and the first btmgmt/connect
-# call afterward. Real-hardware finding: sending an HCI/mgmt command while
-# our own prior radio activity (a pending connect, or -- this one -- our
-# own scan) hasn't fully settled stalls behind it on the same HCI command
-# queue for a real, measured ~1.5s (see _connect_dst_with_polling's doc
-# comment for the pending-connect case). The old 0.10s value predates that
-# finding and was too short to matter -- consistent with the connect right
-# after a scan burst failing almost every time on real hardware, succeeding
-# only once enough time had passed some other way (e.g. a later scan-loop
-# pass). 1.5s matches the measured settle cost directly instead of guessing
-# at a smaller number.
-_SCAN_SETTLE_S = 1.5
-# Time budget to poll ONE pending connect (one dst_type within one outer
-# attempt) before giving up on it -- see _connect_dst_with_polling, whose
-# doc comment covers the debug-instrumented real-hardware finding that
-# re-suppressing BR/EDR Inquiry *during* this wait costs more than it
-# saves (a btmgmt call issued while our own LE Create Connection is
-# pending stalls on the same HCI command queue as that pending connect).
-# Suppressed once before the connect starts and then left alone.
-_CONNECT_ATTEMPT_S = 3.0
-# Tried a shorter budget for "wake" mode specifically here, on the theory
-# its advertising window was tighter than "pairing" mode's -- reverted,
-# 미니 confirmed the two modes' advertising windows are both ~10s, so that
-# wasn't the actual difference. The real pattern (per real-hardware
-# testing): the *first* connect attempt right after our own scan burst
-# fails almost every time, on both modes, and only a later pass (after our
-# own scan has had more time to settle) succeeds -- see _SCAN_SETTLE_S.
-# Each dst_type tried costs ~1.5s (HCI-queue tax) + up to _CONNECT_ATTEMPT_S
-# regardless of outcome (see _connect_dst_with_polling), and both types are
-# always tried (see _connect_sync -- skipping the non-hinted type turned
-# out to be unsafe), so one outer attempt already costs ~9s -- close to
-# the Joy-Con 2's ~10s wake-mode advertising window on its own. 1 outer
-# attempt per _connect_sync call; the scan loop retries on the pad's next
-# advertisement regardless, so this just means a failed pass waits for
-# that next advertisement instead of burning through a second one here
-# that likely wouldn't fit in the same window anyway.
-_CONNECT_ATTEMPTS = 1
+_SCAN_SETTLE_S = 0.10
+# Per-attempt L2CAP connect wait. Short windows fail when Steam keeps LE scan
+# busy; after btmgmt stop-find -l a few hundred ms is enough.
+_CONNECT_ATTEMPT_S = 0.45
+_CONNECT_ATTEMPTS = 16
 
 
 def _adapter_index() -> str:
@@ -91,15 +59,8 @@ def _adapter_index() -> str:
 
 
 _BTMGMT_LOCK = threading.Lock()
-_LAST_BT_INQUIRY_OFF = 0.0
-_BT_INQUIRY_OFF_MIN_INTERVAL_S = 0.35
-
-# Consecutive failed connect passes for a pad -- whether or not it has ever
-# connected in this process -- before we power-cycle the adapter (see
-# _power_cycle_adapter). Each pass is _CONNECT_ATTEMPTS x _CONNECT_ATTEMPT_S
-# ~ 7s, so this fires after ~15s of continuous failure, matching the "only
-# a power cycle clears it" symptom observed on real hardware.
-_RECONNECT_FAILURES_BEFORE_POWER_CYCLE = 2
+_LAST_LE_SCAN_OFF = 0.0
+_LE_SCAN_OFF_MIN_INTERVAL_S = 0.35
 
 
 def _run_quiet(cmd: list[str], *, timeout: float = 2.0) -> None:
@@ -115,69 +76,25 @@ def _run_quiet(cmd: list[str], *, timeout: float = 2.0) -> None:
         pass
 
 
-def _force_bt_inquiry_off(*, force: bool = False) -> None:
-    """HCI-level BR/EDR Inquiry stop.
+def _force_le_scan_off(*, force: bool = False) -> None:
+    """HCI-level LE discovery stop.
 
-    Real-hardware root cause (same host, sibling joyfusion project's btmon
-    investigation): the interference that blocks raw L2CAP connect here was
-    never an *LE* scan despite this function's old name and old ``-l`` flag
-    -- bluetoothd (or something upstream; every external client candidate
-    was ruled out there) restarts ordinary BR/EDR ``Inquiry`` back-to-back,
-    a fresh one firing within ~1s of the previous ``Inquiry Complete``.
-    ``btmgmt stop-find -l`` against BR/EDR discovery returns "Invalid
-    Parameters" instantly (a type mismatch), which is exactly why the old
-    flag silently never helped. ``-b`` actually stops it (``Discovering``
-    flips to ``no``), just not for long, so callers keep re-calling this
-    around connect attempts (see _connect_sync).
-
-    BlueZ's D-Bus ``StopDiscovery`` only ends *our* session; ``btmgmt``
-    clears the HCI-level discovery regardless of who started it. Requires
-    passwordless ``sudo`` for btmgmt (Bazzite default for this user).
+    BlueZ ``StopDiscovery`` only ends *our* session. Steam/steamos-manager keeps
+    its own session forever (``Discovering`` stays true), which blocks raw L2CAP
+    create-connection. ``btmgmt stop-find -l`` stops the controller's LE scan
+    regardless of who started it. Requires passwordless ``sudo`` for btmgmt
+    (Bazzite default for this user).
 
     Never raises — a hung btmgmt must not crash the bridge.
     """
-    global _LAST_BT_INQUIRY_OFF
+    global _LAST_LE_SCAN_OFF
     now = time.monotonic()
     with _BTMGMT_LOCK:
-        if not force and (now - _LAST_BT_INQUIRY_OFF) < _BT_INQUIRY_OFF_MIN_INTERVAL_S:
+        if not force and (now - _LAST_LE_SCAN_OFF) < _LE_SCAN_OFF_MIN_INTERVAL_S:
             return
-        _LAST_BT_INQUIRY_OFF = now
+        _LAST_LE_SCAN_OFF = now
         idx = _adapter_index()
         # Start detached-ish: kill hung btmgmt so we never block the hub.
-        try:
-            proc = subprocess.Popen(
-                ["sudo", "-n", "btmgmt", "-i", idx, "stop-find", "-b"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            try:
-                proc.wait(timeout=1.5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                try:
-                    proc.wait(timeout=0.5)
-                except Exception:  # noqa: BLE001
-                    pass
-        except Exception:  # noqa: BLE001
-            pass
-
-
-def _force_bt_le_scan_off() -> None:
-    """HCI-level LE scan stop (btmgmt stop-find -l).
-
-    D-Bus StopDiscovery only ends *our* session, so when another client
-    (Steam Input, decky-bluetooth-wake-control) holds the adapter's LE
-    discovery and our scanner.start() gets [org.bluez.Error.InProgress],
-    btmgmt is the only way to clear it at the HCI level. Shares the
-    btmgmt lock/throttle with _force_bt_inquiry_off. Never raises.
-    """
-    global _LAST_BT_INQUIRY_OFF
-    now = time.monotonic()
-    with _BTMGMT_LOCK:
-        if (now - _LAST_BT_INQUIRY_OFF) < _BT_INQUIRY_OFF_MIN_INTERVAL_S:
-            return
-        _LAST_BT_INQUIRY_OFF = now
-        idx = _adapter_index()
         try:
             proc = subprocess.Popen(
                 ["sudo", "-n", "btmgmt", "-i", idx, "stop-find", "-l"],
@@ -194,25 +111,6 @@ def _force_bt_le_scan_off() -> None:
                     pass
         except Exception:  # noqa: BLE001
             pass
-
-
-def _power_cycle_adapter() -> None:
-    """Toggle adapter power to clear a wedged radio state.
-
-    Real-hardware finding (today): once reconnects start failing, "only a
-    Bluetooth power cycle recovers" the adapter -- no amount of
-    stop-find/settle retries gets a connect through. This automates that
-    manual recovery. Uses BlueZ D-Bus power toggle (no sudo needed) and
-    drops other Bluetooth devices for a moment; only called by the hub when
-    every previously-connected pad has failed to reconnect repeatedly, so
-    there's no live session to lose.
-
-    Never raises.
-    """
-    _run_quiet(["bluetoothctl", "power", "off"], timeout=3.0)
-    time.sleep(1.0)
-    _run_quiet(["bluetoothctl", "power", "on"], timeout=3.0)
-    time.sleep(2.0)
 
 
 def _bluez_remove_device(mac: str) -> None:
@@ -243,7 +141,7 @@ def prepare_bluez_global() -> None:
          "org.bluez.Adapter1", "StopDiscovery"],
         timeout=1.5,
     )
-    _force_bt_inquiry_off(force=True)
+    _force_le_scan_off(force=True)
 
 
 def prepare_bluez(mac: str = "", *, remove: bool = False) -> None:
@@ -372,7 +270,7 @@ class _ConnectHub:
                         # the adapter's LE discovery; clear it at HCI level so
                         # the retry has a chance instead of crash-looping.
                         prepare_bluez_global()
-                        _force_bt_le_scan_off()
+                        _force_le_scan_off()
                     time.sleep(backoff)
                     backoff = min(backoff * 2, 30.0)
         finally:
@@ -432,7 +330,7 @@ class _ConnectHub:
                             raise
                         hub._scanning = False
                         prepare_bluez_global()
-                        _force_bt_le_scan_off()
+                        _force_le_scan_off()
                         logger.warning(
                             "LE scan held by another client; cleared, retry %d/3",
                             scan_attempt,
@@ -470,15 +368,6 @@ class _ConnectHub:
                         worker = hub.workers_by_mac.get(mac)
                         if worker is not None and not worker.is_connected():
                             _bluez_remove_device(mac)
-                    # Reconnect settle (joyfusion finding): the kernel/BlueZ
-                    # hasn't finished tearing down the just-removed device's
-                    # old L2CAP/ATT association when the next connect starts
-                    # right after; joyfusion settled on 1.5s (500ms wasn't
-                    # enough once retries got faster -- EBUSY). Applied ONLY
-                    # to genuine reconnects (ever_connected); a first-ever
-                    # connect must dial immediately, the Joy-Con 2 advertises
-                    # for only ~10s when woken and a 1.5s delay makes it miss
-                    # that window entirely.
                 async with hub._connect_lock:
                     for mac in pending:
                         worker = hub.workers_by_mac.get(mac)
@@ -486,8 +375,6 @@ class _ConnectHub:
                             hub._logged.discard(mac)
                             hub._last_seen.pop(mac, None)
                             continue
-                        if worker.ever_connected:
-                            await asyncio.sleep(1.5)
                         mode = hub._last_seen[mac][1]
                         try:
                             ok, detail = await hub._loop.run_in_executor(
@@ -501,41 +388,7 @@ class _ConnectHub:
                             hub._logged.discard(mac)
                         else:
                             logger.info("connect to %s (%s) failed (%s)", mac, mode, detail)
-                            _force_bt_inquiry_off(force=True)
-                            # Not gated on worker.ever_connected -- a radio
-                            # that's wedged before this process ever
-                            # connected anything needs the same recovery a
-                            # wedged-after-reconnecting one does. Confirmed
-                            # on real hardware: right after a service
-                            # restart, repeated first-ever-connect failures
-                            # never triggered this (ever_connected was still
-                            # False for every worker), so nothing broke the
-                            # loop except a manual Bluetooth power cycle.
-                            worker.reconnect_failures += 1
-                            if (
-                                worker.reconnect_failures
-                                >= _RECONNECT_FAILURES_BEFORE_POWER_CYCLE
-                                and not any(
-                                    w.is_connected()
-                                    for w in hub.workers_by_mac.values()
-                                )
-                            ):
-                                logger.warning(
-                                    "reconnects failing repeatedly with nothing left connected; "
-                                    "power-cycling adapter to clear wedged radio state"
-                                )
-                                _power_cycle_adapter()
-                                for w in hub.workers_by_mac.values():
-                                    w.reconnect_failures = 0
-                                hub._last_seen.clear()
-                                hub._logged.clear()
-                                # Adapter needs a moment to re-init;
-                                # bail out of this pass -- the scan
-                                # loop will re-see the pads on their
-                                # next advertisement. Also avoids the
-                                # KeyError the cleared _last_seen would
-                                # cause on the next pending mac.
-                                break
+                            _force_le_scan_off(force=True)
 
                 for mac, (seen_at, _) in list(hub._last_seen.items()):
                     if now - seen_at > seen_ttl_s:
@@ -594,36 +447,13 @@ class _ConnectHub:
 
     @staticmethod
     def _connect_dst_with_polling(ctrl: SwitchController, dst: int, attempt_s: float) -> tuple[bool, str]:
-        """Start one connect and poll it to completion or attempt_s, without
-        touching btmgmt again once the connect is in flight.
+        """Suppress LE scan once, then run a single blocking connect attempt.
 
-        Tried re-suppressing BR/EDR Inquiry on every short sub-poll here
-        (every _POLL_SUBINTERVAL_S) on the theory that Inquiry creeping back
-        ~1s after being stopped needed to be re-cancelled repeatedly to keep
-        a multi-second wait clear. Debug-instrumented on real hardware and
-        disproven: each individual select() poll returned in exactly its
-        requested time (no bug there), but a ~1.5s gap appeared *between*
-        polls -- right where the per-poll _force_bt_inquiry_off() call sits.
-        Sending a btmgmt command while our own LE Create Connection is
-        already pending apparently has to wait on the same HCI command queue
-        as that pending connect, so re-suppressing mid-wait was costing
-        almost exactly the price it was trying to avoid. Suppressing once,
-        before starting the connect, and then leaving the pending connect
-        alone for the whole wait avoids that self-inflicted stall -- even
-        though Inquiry may creep back in before this wait ends.
+        Used by the Joy-Con 2 pairing path, which needs to try a specific
+        dst_type without going through _connect_sync's own btmgmt handling.
         """
-        _force_bt_inquiry_off()
-        s, err = ctrl.att._start_connect(dst)
-        if s is None:
-            return False, err
-        status, detail = ctrl.att._poll_connect(s, attempt_s)
-        if status == "connected":
-            ctrl.att._finish_connect(s)
-            return True, "ok"
-        s.close()
-        if status == "pending":
-            return False, "timeout (adapter may still be scanning)"
-        return False, detail
+        _force_le_scan_off()
+        return ctrl.att._connect_once(dst, attempt_s)
 
 
 class _PairGroup:
@@ -776,9 +606,9 @@ class _Worker:
         # see _scan_loop) from this process's first-ever connect to it,
         # which has no stale BlueZ/kernel L2CAP state to wait out.
         self.ever_connected = False
-        # Consecutive failed reconnect passes since the last success or
-        # power cycle; drives the adapter power-cycle recovery (see
-        # _scan_loop).
+        # Consecutive failed reconnect passes since the last success.
+        # Currently tracked but not acted on; kept for the Joy-Con 2
+        # pairing/reconnect path.
         self.reconnect_failures = 0
         # dst_type (LE_PUBLIC/LE_RANDOM) that last actually worked for this
         # mac -- each fresh HCI-level connect/cancel on this hardware costs

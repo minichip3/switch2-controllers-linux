@@ -136,26 +136,6 @@ class ATTClient:
         return False, "; ".join(errors)
 
     def _connect_once(self, dst_type: int, timeout: float) -> tuple[bool, str]:
-        """Blocking single-shot connect (start + poll to completion). Kept
-        for callers that don't need incremental polling; _start_connect /
-        _poll_connect / _finish_connect below split this into steps so a
-        caller can keep re-suppressing BR/EDR Inquiry across a long wait
-        without paying the cost of closing and reopening the socket for
-        every short sub-poll -- see bridge.py's _connect_sync."""
-        s, err = self._start_connect(dst_type)
-        if s is None:
-            return False, err
-        status, detail = self._poll_connect(s, timeout)
-        if status == "connected":
-            self._finish_connect(s)
-            return True, "ok"
-        s.close()
-        return False, detail
-
-    def _start_connect(self, dst_type: int) -> tuple[Optional[socket.socket], str]:
-        """Create the socket and kick off a non-blocking connect. Returns
-        (socket, "") to poll with _poll_connect, or (None, detail) if it
-        failed immediately (bind or an unexpected connect() errno)."""
         s = socket.socket(AF_BLUETOOTH, socket.SOCK_SEQPACKET, BTPROTO_L2CAP)
         s.setsockopt(SOL_BLUETOOTH, BT_SECURITY, struct.pack("BB", BT_SECURITY_LOW, 0))
         fd = s.fileno()
@@ -163,7 +143,7 @@ class ATTClient:
         bind_addr = _sockaddr_l2(0, baddr(self.adapter), ATT_CID, LE_PUBLIC)
         if _libc.bind(fd, bind_addr, len(bind_addr)) != 0:
             s.close()
-            return None, f"L2CAP bind failed (errno {ctypes.get_errno()})"
+            return False, f"L2CAP bind failed (errno {ctypes.get_errno()})"
 
         s.setblocking(False)
         conn_addr = _sockaddr_l2(0, baddr(self.dst), ATT_CID, dst_type)
@@ -171,26 +151,18 @@ class ATTClient:
         errno = ctypes.get_errno()
         if r != 0 and errno not in (115, 114):  # EINPROGRESS / EALREADY
             s.close()
-            return None, f"connect errno {errno}"
-        return s, ""
+            return False, f"connect errno {errno}"
 
-    def _poll_connect(self, s: socket.socket, timeout: float) -> tuple[str, str]:
-        """One short select() poll on an in-progress connect from
-        _start_connect. Returns ("connected", ""), ("pending", "") -- call
-        again, the socket is still good -- or ("failed", detail), at which
-        point the caller must close the socket itself (its connection
-        attempt is dead either way, whether from a real SO_ERROR or from
-        giving up on the overall budget)."""
-        _, w, _ = select.select([], [s.fileno()], [], timeout)
+        _, w, _ = select.select([], [fd], [], timeout)
         if not w:
-            return "pending", ""
+            s.close()
+            return False, "timeout (adapter may still be scanning)"
+
         soerr = s.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
         if soerr != 0:
-            return "failed", f"SO_ERROR {soerr}"
-        return "connected", ""
+            s.close()
+            return False, f"SO_ERROR {soerr}"
 
-    def _finish_connect(self, s: socket.socket) -> None:
-        """Adopt a socket _poll_connect reported as connected."""
         s.setblocking(True)
         self._closing = False
         self.sock = s
@@ -200,6 +172,7 @@ class ATTClient:
             self.exchange_mtu(247)
         except Exception:
             pass
+        return True, "ok"
 
     def close(self) -> None:
         self._closing = True
