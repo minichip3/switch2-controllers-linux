@@ -163,8 +163,6 @@ class Config:
                 raise ValueError(f"player {player} already in use")
             assigned = player
         else:
-            if pair_role:
-                raise ValueError("pair_role requires an explicit --player slot")
             used = {c.get("player", 0) for c in self.controllers}
             assigned = next((p for p in range(1, 9) if p not in used), None)
             if assigned is None:
