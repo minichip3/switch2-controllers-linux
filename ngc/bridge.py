@@ -258,11 +258,15 @@ def prepare_bluez_global() -> None:
     _force_bt_inquiry_off(force=True)
     _force_bt_le_scan_off()
 
-    # Note: do NOT power-cycle here. prepare_bluez_global is called per-pad
-    # during reconnects; power-cycling the adapter would drop the OTHER
-    # pad's live connection, causing a ping-pong disconnect loop. The hub
-    # already handles full adapter power-cycling when ALL pads have failed
-    # to reconnect (see _RECONNECT_FAILURES_BEFORE_POWER_CYCLE).
+    # Fallback: if discovery is still active (btmgmt rejected/hung),
+    # power-toggle the adapter. Some Bazzite builds have a btmgmt that
+    # rejects stop-find; power off/on reliably clears discovery.
+    time.sleep(0.3)
+    if _is_discovering():
+        logger.warning(
+            "btmgmt stop-find did not clear discovery; power-cycling adapter"
+        )
+        _power_cycle_adapter()
 
 
 def prepare_bluez(mac: str = "", *, remove: bool = False) -> None:
