@@ -233,18 +233,6 @@ def _bluez_remove_device(mac: str) -> None:
     )
 
 
-def _is_discovering() -> bool:
-    """Check whether BlueZ discovery is currently active."""
-    try:
-        proc = subprocess.run(
-            ["bluetoothctl", "show"],
-            capture_output=True, text=True, timeout=2.0,
-        )
-        return "Discovering: yes" in proc.stdout
-    except Exception:
-        return False  # assume not discovering if check fails
-
-
 def prepare_bluez_global() -> None:
     """Stop background scanning so raw LE connections can be initiated."""
     subprocess.run(["pkill", "-f", "decky-bluetooth-wake-control"],
@@ -256,17 +244,6 @@ def prepare_bluez_global() -> None:
         timeout=1.5,
     )
     _force_bt_inquiry_off(force=True)
-    _force_bt_le_scan_off()
-
-    # Fallback: if discovery is still active (btmgmt rejected/hung),
-    # power-toggle the adapter. Some Bazzite builds have a btmgmt that
-    # rejects stop-find; power off/on reliably clears discovery.
-    time.sleep(0.3)
-    if _is_discovering():
-        logger.warning(
-            "btmgmt stop-find did not clear discovery; power-cycling adapter"
-        )
-        _power_cycle_adapter()
 
 
 def prepare_bluez(mac: str = "", *, remove: bool = False) -> None:
