@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import getpass
 import json
 import os
-import pwd
 import re
 import subprocess
 import time
@@ -18,17 +16,6 @@ PY = Path(os.environ.get("NGC_PYTHON", PROJECT_DIR / ".venv312" / "bin" / "pytho
 SERVICE = "nso-gc.service"
 STATE_PATH = Path.home() / ".config" / "nso-gc" / "state.json"
 STATE_STALE_S = 8.0
-
-# Error strings that indicate `systemctl --user` / `journalctl --user` couldn't
-# reach the D-Bus session bus at all (as opposed to some other failure like
-# the unit not existing). Used to decide whether the --machine=<user>@
-# fallback is worth trying.
-_BUS_ERROR_MARKERS = (
-    "failed to connect to bus",
-    "failed to connect to user scope bus",
-    "connection refused",
-    "no medium found",
-)
 
 
 @dataclass
@@ -45,89 +32,19 @@ def _run(cmd: list[str], *, timeout: float = 30.0, cwd: str | None = None) -> su
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd or str(PROJECT_DIR))
 
 
-def _target_username() -> str:
-    """User whose systemd --user instance / D-Bus session we want to reach.
-
-    Decky sets DECKY_USER to the unprivileged user it dropped privileges to
-    (see SandboxedPlugin.initialize in decky-loader); fall back to whoever
-    this process is actually running as when invoked outside Decky (GUI, CLI).
-    Never hardcode a username.
-    """
-    return os.environ.get("DECKY_USER") or getpass.getuser()
-
-
-def _target_uid(username: str) -> Optional[int]:
-    try:
-        return pwd.getpwnam(username).pw_uid
-    except KeyError:
-        return None
-
-
-def _user_ctl_env(username: str) -> dict[str, str]:
-    """Environment for talking to `username`'s systemd --user / D-Bus session.
-
-    Decky Loader (as of v3.x, see SandboxedPlugin.initialize) sets HOME,
-    USER and DECKY_USER for the plugin subprocess but never XDG_RUNTIME_DIR
-    or DBUS_SESSION_BUS_ADDRESS, so `systemctl --user` can't find the
-    session bus socket at /run/user/<uid>/bus even though the plugin really
-    is running as the unprivileged user. Fill both in explicitly so the env
-    reaches subprocess.run() regardless of what main.py did to os.environ
-    (each subprocess.run() call gets its own env, it isn't inherited from a
-    one-time os.environ mutation made earlier in the process).
-    """
-    env = dict(os.environ)
-    uid = _target_uid(username)
-    if uid is not None:
-        runtime_dir = f"/run/user/{uid}"
-        # Always set — Decky sandbox may not reflect real /run/user/<uid> path.
-        env["XDG_RUNTIME_DIR"] = runtime_dir
-        env.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path={runtime_dir}/bus")
-    return env
-
-
-def _looks_like_bus_error(stderr: str) -> bool:
-    low = (stderr or "").lower()
-    return any(marker in low for marker in _BUS_ERROR_MARKERS)
-
-
-def _run_user_ctl(binary: str, args: list[str], *, timeout: float = 30.0) -> subprocess.CompletedProcess[str]:
-    """Run `<binary> --user <args>` targeting the current/Decky user's session.
-
-    Decky's sandboxed plugin env cannot reach /run/user/<uid>/bus,
-    so wrap the call in `runuser` when under Decky to get a fresh user env.
-    Outside Decky, call `systemctl --user` directly with XDG_RUNTIME_DIR set.
-    """
-    username = _target_username()
-    is_decky = "DECKY_USER" in os.environ
-
-    if is_decky:
-        # runuser gives us a fresh deck user environment with proper D-Bus
-        cmd = ["runuser", "-u", username, "--", binary, "--user"] + args
-        r = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout, cwd=str(PROJECT_DIR)
-        )
-    else:
-        env = _user_ctl_env(username)
-        cmd = [binary, "--user"] + args
-        r = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout, cwd=str(PROJECT_DIR), env=env
-        )
-    return r
-
-
 def service_state() -> str:
-    r = _run_user_ctl("systemctl", ["is-active", SERVICE], timeout=5)
+    r = _run(["systemctl", "--user", "is-active", SERVICE], timeout=5)
     return (r.stdout or "inactive").strip() or "inactive"
 
 
 def ensure_service() -> None:
-    _run_user_ctl("systemctl", ["reset-failed", SERVICE], timeout=5)
-    _run_user_ctl("systemctl", ["enable", "--now", SERVICE], timeout=15)
+    _run(["systemctl", "--user", "reset-failed", SERVICE], timeout=5)
+    _run(["systemctl", "--user", "enable", "--now", SERVICE], timeout=15)
 
 
 def restart_service() -> None:
-    _run_user_ctl("systemctl", ["reset-failed", SERVICE], timeout=5)
-    _run_user_ctl("systemctl", ["restart", SERVICE], timeout=15)
+    _run(["systemctl", "--user", "reset-failed", SERVICE], timeout=5)
+    _run(["systemctl", "--user", "restart", SERVICE], timeout=15)
 
 
 def load_pads() -> list[PadStatus]:
@@ -252,7 +169,7 @@ def get_status() -> dict[str, Any]:
 
 def run_ngc(args: list[str], *, timeout: float = 120.0, stop_service: bool = False) -> tuple[int, str]:
     if stop_service:
-        _run_user_ctl("systemctl", ["stop", SERVICE], timeout=10)
+        _run(["systemctl", "--user", "stop", SERVICE], timeout=10)
     r = _run([str(PY), "-m", "ngc", *args], timeout=timeout)
     ensure_service()
     return r.returncode, ((r.stdout or "") + (r.stderr or "")).strip()
@@ -266,7 +183,8 @@ def run_config(args: list[str], *, restart: bool = True) -> tuple[int, str]:
 
 
 def recent_logs(lines: int = 35) -> str:
-    r = _run_user_ctl(
-        "journalctl", ["-u", SERVICE, "-n", str(lines), "--no-pager", "-o", "cat"], timeout=10
+    r = _run(
+        ["journalctl", "--user", "-u", SERVICE, "-n", str(lines), "--no-pager", "-o", "cat"],
+        timeout=10,
     )
     return (r.stdout or r.stderr or "(empty)").strip()[-3000:]
