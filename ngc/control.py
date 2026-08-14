@@ -93,33 +93,26 @@ def _looks_like_bus_error(stderr: str) -> bool:
 def _run_user_ctl(binary: str, args: list[str], *, timeout: float = 30.0) -> subprocess.CompletedProcess[str]:
     """Run `<binary> --user <args>` targeting the current/Decky user's session.
 
-    Decky's sandboxed plugin environment cannot reach /run/user/<uid>/bus,
-    so use `--machine=<user>@` (machined) as the primary path when running
-    under Decky. Fall back to direct `systemctl --user` (with XDG_RUNTIME_DIR)
-    when not in Decky context, or when --machine fails.
+    Decky's sandboxed plugin env cannot reach /run/user/<uid>/bus,
+    so wrap the call in `runuser` when under Decky to get a fresh user env.
+    Outside Decky, call `systemctl --user` directly with XDG_RUNTIME_DIR set.
     """
     username = _target_username()
     is_decky = "DECKY_USER" in os.environ
 
-    # Primary: --machine=<user>@ works even in sandboxed Decky context
-    cmd_machine = [binary, "--user", f"--machine={username}@", *args]
-    r_machine = subprocess.run(
-        cmd_machine, capture_output=True, text=True, timeout=timeout, cwd=str(PROJECT_DIR)
-    )
-    if r_machine.returncode == 0:
-        return r_machine
-
-    # Fallback: direct --user with XDG_RUNTIME_DIR (works outside Decky)
-    if not is_decky:
-        env = _user_ctl_env(username)
-        cmd_direct = [binary, "--user", *args]
-        r_direct = subprocess.run(
-            cmd_direct, capture_output=True, text=True, timeout=timeout, cwd=str(PROJECT_DIR), env=env
+    if is_decky:
+        # runuser gives us a fresh deck user environment with proper D-Bus
+        cmd = ["runuser", "-u", username, "--", binary, "--user"] + args
+        r = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout, cwd=str(PROJECT_DIR)
         )
-        if r_direct.returncode == 0:
-            return r_direct
-
-    return r_machine
+    else:
+        env = _user_ctl_env(username)
+        cmd = [binary, "--user"] + args
+        r = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout, cwd=str(PROJECT_DIR), env=env
+        )
+    return r
 
 
 def service_state() -> str:
