@@ -14,25 +14,16 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Decky backend runs as `root`, but nso-gc lives under the deck user's
 # systemd user session (/run/user/1000) and config (~/.config/nso-gc/).
-# Fix HOME / XDG_RUNTIME_DIR so ngc.control (which uses Path.home() and
-# systemctl --user) resolves the correct paths.
+# Decky sets HOME and DECKY_USER_HOME for us, but not XDG_RUNTIME_DIR.
+# We derive it from DECKY_USER so it works for any user, not just "deck".
 # ---------------------------------------------------------------------------
-_decky_home = os.environ.get("DECKY_USER_HOME")
-if _decky_home:
-    os.environ["HOME"] = _decky_home
-    os.environ["XDG_RUNTIME_DIR"] = "/run/user/1000"
-    # Fallback for non-Decky testing
-elif os.getuid() == 0:
-    # Running as root outside Decky — still try to target the deck user
+_decky_user = os.environ.get("DECKY_USER", "deck")
+try:
     import pwd
-    _decky_home = "/home/deck"  # Bazzite default
-    try:
-        pw = pwd.getpwnam("deck")
-        _decky_home = pw.pw_dir
-        os.environ["XDG_RUNTIME_DIR"] = f"/run/user/{pw.pw_uid}"
-    except KeyError:
-        pass
-    os.environ["HOME"] = _decky_home
+    _pw = pwd.getpwnam(_decky_user)
+    os.environ["XDG_RUNTIME_DIR"] = f"/run/user/{_pw.pw_uid}"
+except KeyError:
+    pass
 
 PROJECT_DIR = os.environ.get("NGC_PROJECT_DIR", os.path.expanduser("~/nso-gc-bazzite"))
 if PROJECT_DIR not in sys.path:
