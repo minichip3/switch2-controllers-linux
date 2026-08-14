@@ -1,15 +1,18 @@
 """Decky Loader backend for Switch 2 Controllers.
 
-Decky's sandbox cannot reach D-Bus, so we set XDG_RUNTIME_DIR explicitly
-in each subprocess call via `env=`.
+Decky's sandbox cannot reach D-Bus for systemctl --user, so we manage
+the ngc bridge process directly via subprocess.Popen.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import signal
 import subprocess
 import sys
+from dataclasses import asdict
+from pathlib import Path
 
 try:
     import decky
@@ -27,45 +30,103 @@ def _log(msg: str) -> None:
     if decky is not None:
         decky.logger.info(msg)
 
+_PY = Path(PROJECT_DIR) / ".venv312" / "bin" / "python"
 
-SERVICE = "nso-gc.service"
+# ── Direct bridge process ────────────────────────────────────────────────
 
-# ── Environment for systemctl --user inside Decky sandbox ─────────────────
+_bridge_proc: subprocess.Popen | None = None
 
 
-def _ctl_env() -> dict:
+def _is_running() -> bool:
+    if _bridge_proc is None:
+        return False
+    return _bridge_proc.poll() is None
+
+
+def _start() -> bool:
+    global _bridge_proc
+    if _is_running():
+        return True
+    if not _PY.is_file():
+        _log(f"Python not found: {_PY}")
+        return False
     env = dict(os.environ)
-    env["XDG_RUNTIME_DIR"] = "/run/user/1000"
-    env["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=/run/user/1000/bus"
-    return env
+    env["HOME"] = str(Path.home())
+    _bridge_proc = subprocess.Popen(
+        [str(_PY), "-m", "ngc", "run"],
+        cwd=str(Path(PROJECT_DIR)),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=env,
+        start_new_session=True,
+    )
+    _log(f"Started ngc bridge (pid={_bridge_proc.pid})")
+    return True
 
 
-def _systemctl_user(*args: str, timeout: float = 30.0) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["systemctl", "--user"] + list(args),
+def _stop() -> None:
+    global _bridge_proc
+    if _bridge_proc is None:
+        return
+    try:
+        os.killpg(os.getpgid(_bridge_proc.pid), signal.SIGTERM)
+        _bridge_proc.wait(timeout=5)
+    except Exception as e:
+        _log(f"Stop error: {e}")
+        try:
+            os.killpg(os.getpgid(_bridge_proc.pid), signal.SIGKILL)
+        except Exception:
+            pass
+    _bridge_proc = None
+    _log("Stopped ngc bridge")
+
+
+def _cli(args: list[str], *, timeout: float = 120.0) -> tuple[int, str]:
+    r = subprocess.run(
+        [str(_PY), "-m", "ngc"] + args,
         capture_output=True,
         text=True,
         timeout=timeout,
-        env=_ctl_env(),
+        cwd=str(Path(PROJECT_DIR)),
     )
+    return r.returncode, ((r.stdout or "") + (r.stderr or "")).strip()
 
 
-# ── Service helpers ──────────────────────────────────────────────────────
+def _get_status() -> dict:
+    svc = "active" if _is_running() else "inactive"
+    pads = sorted(control.load_pads(), key=lambda p: p.player)
+    state = control.read_bridge_state() if svc == "active" else None
+    merged = control.merge_state(pads, state)
+    connected = sum(1 for p in merged if p.connected)
 
+    if svc != "active":
+        headline, detail = "Bridge is off", "Start the bridge to connect controllers."
+    elif state and state.get("hub_error"):
+        headline, detail = "Needs attention", str(state.get("hub_error", ""))[:200]
+    elif state:
+        headline = str(state.get("headline") or "Ready")
+        detail = str(state.get("detail") or "Hold Sync on a saved controller to connect.")
+    elif not pads:
+        headline, detail = "Get started", "Add your first controller with Sync."
+    elif connected:
+        names = ", ".join(f"P{p.player}" for p in merged if p.connected)
+        headline, detail = f"{connected} connected", f"{names} — ready in Steam"
+    else:
+        headline, detail = "Ready", "Hold Sync on a saved controller to connect."
 
-def _service_state() -> str:
-    r = _systemctl_user("is-active", SERVICE, timeout=5)
-    return (r.stdout or "inactive").strip() or "inactive"
-
-
-def _ensure_service() -> None:
-    _systemctl_user("reset-failed", SERVICE, timeout=5)
-    _systemctl_user("enable", "--now", SERVICE, timeout=15)
-
-
-def _restart_service() -> None:
-    _systemctl_user("reset-failed", SERVICE, timeout=5)
-    _systemctl_user("restart", SERVICE, timeout=15)
+    return {
+        "service": svc,
+        "headline": headline,
+        "detail": detail,
+        "connected_count": connected,
+        "pads": [
+            {
+                **asdict(p),
+                "status": control.pad_status_line(p, svc),
+            }
+            for p in merged
+        ],
+    }
 
 
 # ── Plugin ───────────────────────────────────────────────────────────────
@@ -76,54 +137,17 @@ class Plugin:
         _log(f"Switch 2 Controllers decky plugin loaded ({PROJECT_DIR})")
 
     async def _unload(self) -> None:
-        _log("Switch 2 Controllers plugin unloaded")
+        _log("Unloading Switch 2 Controllers")
+        _stop()
 
     async def get_status(self) -> dict:
-        def work():
-            svc = _service_state()
-            pads = sorted(control.load_pads(), key=lambda p: p.player)
-            state = control.read_bridge_state() if svc == "active" else None
-            merged = control.merge_state(pads, state)
-            connected = sum(1 for p in merged if p.connected)
-
-            if svc != "active":
-                headline, detail = "Bridge is off", "Start the bridge to connect controllers."
-            elif state and state.get("hub_error"):
-                headline, detail = "Needs attention", str(state.get("hub_error", ""))[:200]
-            elif state:
-                headline = str(state.get("headline") or "Ready")
-                detail = str(state.get("detail") or "Hold Sync on a saved controller to connect.")
-            elif not pads:
-                headline, detail = "Get started", "Add your first controller with Sync."
-            elif connected:
-                names = ", ".join(f"P{p.player}" for p in merged if p.connected)
-                headline, detail = f"{connected} connected", f"{names} — ready in Steam"
-            else:
-                headline, detail = "Ready", "Hold Sync on a saved controller to connect."
-
-            from dataclasses import asdict
-
-            return {
-                "service": svc,
-                "headline": headline,
-                "detail": detail,
-                "connected_count": connected,
-                "pads": [
-                    {
-                        **asdict(p),
-                        "status": control.pad_status_line(p, svc),
-                    }
-                    for p in merged
-                ],
-            }
-
-        return await asyncio.get_event_loop().run_in_executor(None, work)
+        return await asyncio.get_event_loop().run_in_executor(None, _get_status)
 
     async def ensure_bridge(self) -> dict:
-        _log("ensure_bridge: calling ensure_service")
+        _log("ensure_bridge: starting bridge")
 
         def work():
-            _ensure_service()
+            _start()
 
         await asyncio.get_event_loop().run_in_executor(None, work)
         st = await self.get_status()
@@ -131,16 +155,21 @@ class Plugin:
         return {"ok": True, "status": st}
 
     async def add_controller(self) -> dict:
-        def work() -> tuple[int, str]:
-            rc, out = control.run_ngc(["pair", "--timeout", "60"], timeout=150, stop_service=True)
+        def work():
+            _stop()
+            rc, out = _cli(["pair", "--timeout", "60"], timeout=150)
+            _start()
             return rc, out
 
         rc, out = await asyncio.get_event_loop().run_in_executor(None, work)
         return {"ok": rc == 0, "message": out[-1500:] if out else ""}
 
     async def remove_controller(self, mac: str) -> dict:
-        def work() -> tuple[int, str]:
-            return control.run_config(["remove", "--mac", mac.upper()])
+        def work():
+            rc, out = _cli(["remove", "--mac", mac.upper()])
+            _stop()
+            _start()
+            return rc, out
 
         rc, out = await asyncio.get_event_loop().run_in_executor(None, work)
         return {"ok": rc == 0, "message": out[-1500:] if out else ""}
@@ -148,43 +177,53 @@ class Plugin:
     async def repair_controller(self, mac: str, player: int) -> dict:
         mac = mac.upper()
 
-        def work() -> tuple[int, str]:
-            rc, out = control.run_config(["remove", "--mac", mac], restart=False)
+        def work():
+            rc, out = _cli(["remove", "--mac", mac])
             if rc != 0:
                 return rc, out
-            return control.run_ngc(
-                ["pair", "--timeout", "60", "--player", str(int(player))],
-                timeout=150,
-                stop_service=True,
-            )
+            _stop()
+            rc, out = _cli(["pair", "--timeout", "60", "--player", str(int(player))], timeout=150)
+            _start()
+            return rc, out
 
         rc, out = await asyncio.get_event_loop().run_in_executor(None, work)
         return {"ok": rc == 0, "message": out[-1500:] if out else ""}
 
     async def swap_players(self) -> dict:
-        def work() -> tuple[int, str]:
-            return control.run_config(["swap", "--players", "1", "2"])
+        def work():
+            rc, out = _cli(["swap", "--players", "1", "2"])
+            _stop()
+            _start()
+            return rc, out
 
         rc, out = await asyncio.get_event_loop().run_in_executor(None, work)
         return {"ok": rc == 0, "message": out[-1500:] if out else ""}
 
     async def rebond(self) -> dict:
-        def work() -> tuple[int, str]:
-            return control.run_ngc(["rebond", "--timeout", "45"], timeout=120, stop_service=True)
+        def work():
+            _stop()
+            rc, out = _cli(["rebond", "--timeout", "45"], timeout=120)
+            _start()
+            return rc, out
 
         rc, out = await asyncio.get_event_loop().run_in_executor(None, work)
         return {"ok": rc == 0, "message": out[-1500:] if out else ""}
 
     async def restart_bridge(self) -> dict:
-        def work() -> None:
-            _restart_service()
+        def work():
+            _stop()
+            _start()
 
         await asyncio.get_event_loop().run_in_executor(None, work)
         return {"ok": True, "status": await self.get_status()}
 
     async def get_logs(self) -> str:
-        def work() -> str:
-            r = _systemctl_user("status", SERVICE, timeout=10)
-            return (r.stdout or r.stderr or "(empty)").strip()[-3000:]
+        def work():
+            state = control.read_bridge_state()
+            if state:
+                import json
+
+                return json.dumps(state, indent=2)
+            return "(no bridge logs available)"
 
         return await asyncio.get_event_loop().run_in_executor(None, work)
