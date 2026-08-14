@@ -18,6 +18,23 @@ STATE_PATH = Path.home() / ".config" / "nso-gc" / "state.json"
 STATE_STALE_S = 8.0
 
 
+def _decky_user() -> str:
+    """Decky 컨텍스트이면 DECKY_USER를, 아니면 현재 사용자를 반환."""
+    decky = os.environ.get("DECKY_USER")
+    if decky:
+        return decky
+    try:
+        import pwd
+        return pwd.getpwuid(os.getuid()).pw_name
+    except (ImportError, KeyError):
+        return "deck"
+
+
+def _user_flag() -> str:
+    """systemctl/journalctl --user=<username> 플래그."""
+    return f"--user={_decky_user()}"
+
+
 @dataclass
 class PadStatus:
     player: int
@@ -33,18 +50,18 @@ def _run(cmd: list[str], *, timeout: float = 30.0, cwd: str | None = None) -> su
 
 
 def service_state() -> str:
-    r = _run(["systemctl", "--user", "is-active", SERVICE], timeout=5)
+    r = _run(["systemctl", _user_flag(), "is-active", SERVICE], timeout=5)
     return (r.stdout or "inactive").strip() or "inactive"
 
 
 def ensure_service() -> None:
-    _run(["systemctl", "--user", "reset-failed", SERVICE], timeout=5)
-    _run(["systemctl", "--user", "enable", "--now", SERVICE], timeout=15)
+    _run(["systemctl", _user_flag(), "reset-failed", SERVICE], timeout=5)
+    _run(["systemctl", _user_flag(), "enable", "--now", SERVICE], timeout=15)
 
 
 def restart_service() -> None:
-    _run(["systemctl", "--user", "reset-failed", SERVICE], timeout=5)
-    _run(["systemctl", "--user", "restart", SERVICE], timeout=15)
+    _run(["systemctl", _user_flag(), "reset-failed", SERVICE], timeout=5)
+    _run(["systemctl", _user_flag(), "restart", SERVICE], timeout=15)
 
 
 def load_pads() -> list[PadStatus]:
@@ -169,7 +186,7 @@ def get_status() -> dict[str, Any]:
 
 def run_ngc(args: list[str], *, timeout: float = 120.0, stop_service: bool = False) -> tuple[int, str]:
     if stop_service:
-        _run(["systemctl", "--user", "stop", SERVICE], timeout=10)
+        _run(["systemctl", _user_flag(), "stop", SERVICE], timeout=10)
     r = _run([str(PY), "-m", "ngc", *args], timeout=timeout)
     ensure_service()
     return r.returncode, ((r.stdout or "") + (r.stderr or "")).strip()
@@ -183,15 +200,8 @@ def run_config(args: list[str], *, restart: bool = True) -> tuple[int, str]:
 
 
 def recent_logs(lines: int = 35) -> str:
-    # --user=deck를 사용해 deck 유저 session의 로그를 읽음
-    # Decky가 root로 실행될 때 --user만 쓰면 root session을 타므로
-    decky_home = os.environ.get("DECKY_USER_HOME")
-    if decky_home:
-        user_flag = "--user=deck"
-    else:
-        user_flag = "--user"
     r = _run(
-        ["journalctl", user_flag, "-u", SERVICE, "-n", str(lines), "--no-pager", "-o", "cat"],
+        ["journalctl", _user_flag(), "-u", SERVICE, "-n", str(lines), "--no-pager", "-o", "cat"],
         timeout=10,
     )
     return (r.stdout or r.stderr or "(empty)").strip()[-3000:]
