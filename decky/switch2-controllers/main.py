@@ -11,12 +11,22 @@ try:
 except ImportError:
     decky = None  # type: ignore
 
-# Decky v3 sets HOME/DECKY_USER but NOT XDG_RUNTIME_DIR.
-# systemctl --user needs it to find the D-Bus session bus socket.
+# Decky Loader drops privileges to the unprivileged (host) user before running
+# our main.py -- see SandboxedPlugin.initialize() in decky-loader, which sets
+# HOME/USER/DECKY_USER but never XDG_RUNTIME_DIR or DBUS_SESSION_BUS_ADDRESS.
+# `systemctl --user` needs one of those to find the D-Bus session bus socket
+# at /run/user/<uid>/bus, so set it here as an early best-effort default.
+#
+# This alone isn't sufficient though: subprocess.run() calls in ngc/control.py
+# each get their own explicit `env=` (see control._user_ctl_env), because
+# relying purely on a one-time os.environ mutation here is fragile (ordering
+# vs. imports, subprocess env snapshots, etc). Never hardcode "deck" -- derive
+# the uid from DECKY_USER (set by Decky) or fall back to the user this process
+# actually runs as.
 try:
     import pwd
-    _pw = pwd.getpwnam(os.environ.get("DECKY_USER", "deck"))
-    os.environ["XDG_RUNTIME_DIR"] = f"/run/user/{_pw.pw_uid}"
+    _username = os.environ.get("DECKY_USER") or pwd.getpwuid(os.getuid()).pw_name
+    os.environ.setdefault("XDG_RUNTIME_DIR", f"/run/user/{pwd.getpwnam(_username).pw_uid}")
 except KeyError:
     pass
 
