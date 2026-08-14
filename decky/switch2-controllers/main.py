@@ -11,6 +11,15 @@ try:
 except ImportError:
     decky = None  # type: ignore
 
+# Decky v3 sets HOME/DECKY_USER but NOT XDG_RUNTIME_DIR.
+# systemctl --user needs it to find the D-Bus session bus socket.
+try:
+    import pwd
+    _pw = pwd.getpwnam(os.environ.get("DECKY_USER", "deck"))
+    os.environ["XDG_RUNTIME_DIR"] = f"/run/user/{_pw.pw_uid}"
+except KeyError:
+    pass
+
 PROJECT_DIR = os.environ.get("NGC_PROJECT_DIR", os.path.expanduser("~/nso-gc-bazzite"))
 if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
