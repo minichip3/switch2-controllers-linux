@@ -2,7 +2,7 @@
 
 Decky's PyInstaller bundle leaks LD_LIBRARY_PATH into every subprocess,
 which breaks systemctl (wrong libcrypto.so.3). Clear it at import time.
-See: hiddify-steam-deck-vpn for the same workaround.
+Also set XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS for systemctl --user.
 """
 
 from __future__ import annotations
@@ -31,22 +31,26 @@ def _log(msg: str) -> None:
         decky.logger.info(msg)
 
 
-SERVICE = "nso-gc.service"
+# ── Decky env for systemctl --user ──────────────────────────────────────
+
+def _decky_env() -> dict:
+    env = dict(os.environ)
+    env["XDG_RUNTIME_DIR"] = "/run/user/1000"
+    env["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=/run/user/1000/bus"
+    return env
 
 
-def _service_state() -> str:
-    r = control._run(["systemctl", "--user", "is-active", SERVICE], timeout=5)
-    return (r.stdout or "inactive").strip() or "inactive"
+# Patch control._run so systemctl calls get the Decky env
+_original_run = control._run
 
 
-def _ensure_service() -> None:
-    control._run(["systemctl", "--user", "reset-failed", SERVICE], timeout=5)
-    control._run(["systemctl", "--user", "enable", "--now", SERVICE], timeout=15)
+def _decky_run(cmd, *, timeout=30.0, cwd=None, env=None):
+    if env is None:
+        env = _decky_env()
+    return _original_run(cmd, timeout=timeout, cwd=cwd, env=env)
 
 
-def _restart_service() -> None:
-    control._run(["systemctl", "--user", "reset-failed", SERVICE], timeout=5)
-    control._run(["systemctl", "--user", "restart", SERVICE], timeout=15)
+control._run = _decky_run
 
 
 # ── Plugin ───────────────────────────────────────────────────────────────
@@ -60,16 +64,13 @@ class Plugin:
         _log("Switch 2 Controllers plugin unloaded")
 
     async def get_status(self) -> dict:
-        def work():
-            return control.get_status()
-
-        return await asyncio.get_event_loop().run_in_executor(None, work)
+        return await asyncio.get_event_loop().run_in_executor(None, control.get_status)
 
     async def ensure_bridge(self) -> dict:
         _log("ensure_bridge: calling ensure_service")
 
         def work():
-            _ensure_service()
+            control.ensure_service()
 
         await asyncio.get_event_loop().run_in_executor(None, work)
         st = await self.get_status()
@@ -122,13 +123,10 @@ class Plugin:
 
     async def restart_bridge(self) -> dict:
         def work() -> None:
-            _restart_service()
+            control.restart_service()
 
         await asyncio.get_event_loop().run_in_executor(None, work)
         return {"ok": True, "status": await self.get_status()}
 
     async def get_logs(self) -> str:
-        def work() -> str:
-            return control.recent_logs(35)
-
-        return await asyncio.get_event_loop().run_in_executor(None, work)
+        return await asyncio.get_event_loop().run_in_executor(None, control.recent_logs)

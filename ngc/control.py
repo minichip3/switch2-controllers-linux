@@ -28,8 +28,12 @@ class PadStatus:
     battery_pct: Optional[int] = None
 
 
-def _run(cmd: list[str], *, timeout: float = 30.0, cwd: str | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd or str(PROJECT_DIR))
+def _run(cmd: list[str], *, timeout: float = 30.0, cwd: str | None = None,
+         env: dict | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        cmd, capture_output=True, text=True, timeout=timeout,
+        cwd=cwd or str(PROJECT_DIR), env=env,
+    )
 
 
 def service_state() -> str:
