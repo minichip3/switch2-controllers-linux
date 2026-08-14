@@ -45,13 +45,20 @@ def _log(msg: str) -> None:
 class Plugin:
     async def _main(self) -> None:
         _log(f"Switch 2 Controllers decky plugin loaded ({PROJECT_DIR})")
+        _log(f"XDG_RUNTIME_DIR={os.environ.get('XDG_RUNTIME_DIR','<none>')}")
+        _log(f"uid={os.getuid()} DECKY_USER={os.environ.get('DECKY_USER','<none>')}")
 
     async def get_status(self) -> dict:
-        return control.get_status()
+        st = control.get_status()
+        _log(f"get_status: service={st.get('service')}")
+        return st
 
     async def ensure_bridge(self) -> dict:
+        _log("ensure_bridge: calling ensure_service")
         control.ensure_service()
-        return {"ok": True, "status": control.get_status()}
+        st = control.get_status()
+        _log(f"ensure_bridge done: service={st.get('service')}")
+        return {"ok": True, "status": st}
 
     async def add_controller(self) -> dict:
         def work() -> tuple[int, str]:
@@ -109,3 +116,6 @@ class Plugin:
             return control.recent_logs()
 
         return await asyncio.get_event_loop().run_in_executor(None, work)
+
+    async def _unload(self) -> None:
+        _log("Switch 2 Controllers plugin unloaded")

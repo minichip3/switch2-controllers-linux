@@ -79,9 +79,9 @@ def _user_ctl_env(username: str) -> dict[str, str]:
     uid = _target_uid(username)
     if uid is not None:
         runtime_dir = f"/run/user/{uid}"
-        if os.path.isdir(runtime_dir):
-            env["XDG_RUNTIME_DIR"] = runtime_dir
-            env.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path={runtime_dir}/bus")
+        # Always set — Decky sandbox may not reflect real /run/user/<uid> path.
+        env["XDG_RUNTIME_DIR"] = runtime_dir
+        env.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path={runtime_dir}/bus")
     return env
 
 
@@ -102,10 +102,20 @@ def _run_user_ctl(binary: str, args: list[str], *, timeout: float = 30.0) -> sub
        relying on our own XDG_RUNTIME_DIR at all.
     """
     username = _target_username()
+    env = _user_ctl_env(username)
     cmd = [binary, "--user", *args]
     r = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=timeout, cwd=str(PROJECT_DIR), env=_user_ctl_env(username)
+        cmd, capture_output=True, text=True, timeout=timeout, cwd=str(PROJECT_DIR), env=env
     )
+    # Debug: log what we passed
+    import sys
+    _dbg = f"user={username} rc={r.returncode} XDG={env.get('XDG_RUNTIME_DIR','<none>')} bus={env.get('DBUS_SESSION_BUS_ADDRESS','<none>')}
+"
+    if r.stderr:
+        _dbg += f" stderr={r.stderr[:200]}
+"
+    sys.stderr.write(_dbg)
+    sys.stderr.flush()
     if r.returncode != 0 and _looks_like_bus_error(r.stderr):
         cmd_fallback = [binary, "--user", f"--machine={username}@", *args]
         r_fallback = subprocess.run(
