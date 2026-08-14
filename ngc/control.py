@@ -183,8 +183,15 @@ def run_config(args: list[str], *, restart: bool = True) -> tuple[int, str]:
 
 
 def recent_logs(lines: int = 35) -> str:
+    # --user=deck를 사용해 deck 유저 session의 로그를 읽음
+    # Decky가 root로 실행될 때 --user만 쓰면 root session을 타므로
+    decky_home = os.environ.get("DECKY_USER_HOME")
+    if decky_home:
+        user_flag = "--user=deck"
+    else:
+        user_flag = "--user"
     r = _run(
-        ["journalctl", "--user", "-u", SERVICE, "-n", str(lines), "--no-pager", "-o", "cat"],
+        ["journalctl", user_flag, "-u", SERVICE, "-n", str(lines), "--no-pager", "-o", "cat"],
         timeout=10,
     )
     return (r.stdout or r.stderr or "(empty)").strip()[-3000:]
