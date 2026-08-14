@@ -93,35 +93,33 @@ def _looks_like_bus_error(stderr: str) -> bool:
 def _run_user_ctl(binary: str, args: list[str], *, timeout: float = 30.0) -> subprocess.CompletedProcess[str]:
     """Run `<binary> --user <args>` targeting the current/Decky user's session.
 
-    Two layers of defense against the missing-XDG_RUNTIME_DIR problem:
-    1. Pass XDG_RUNTIME_DIR/DBUS_SESSION_BUS_ADDRESS explicitly via `env=`
-       so it doesn't depend on os.environ mutations happening to propagate.
-    2. If that still can't reach the bus (e.g. /run/user/<uid> doesn't
-       exist yet), fall back to `--machine=<user>@`, which asks systemd to
-       look up the user's --user manager instance via machined instead of
-       relying on our own XDG_RUNTIME_DIR at all.
+    Decky's sandboxed plugin environment cannot reach /run/user/<uid>/bus,
+    so use `--machine=<user>@` (machined) as the primary path when running
+    under Decky. Fall back to direct `systemctl --user` (with XDG_RUNTIME_DIR)
+    when not in Decky context, or when --machine fails.
     """
     username = _target_username()
-    env = _user_ctl_env(username)
-    cmd = [binary, "--user", *args]
-    r = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=timeout, cwd=str(PROJECT_DIR), env=env
+    is_decky = "DECKY_USER" in os.environ
+
+    # Primary: --machine=<user>@ works even in sandboxed Decky context
+    cmd_machine = [binary, "--user", f"--machine={username}@", *args]
+    r_machine = subprocess.run(
+        cmd_machine, capture_output=True, text=True, timeout=timeout, cwd=str(PROJECT_DIR)
     )
-    # Debug: log what we passed
-    import sys
-    _dbg = f"user={username} rc={r.returncode} XDG={env.get('XDG_RUNTIME_DIR','<none>')} bus={env.get('DBUS_SESSION_BUS_ADDRESS','<none>')}\n"
-    if r.stderr:
-        _dbg += f" stderr={r.stderr[:200]}\n"
-    sys.stderr.write(_dbg)
-    sys.stderr.flush()
-    if r.returncode != 0 and _looks_like_bus_error(r.stderr):
-        cmd_fallback = [binary, "--user", f"--machine={username}@", *args]
-        r_fallback = subprocess.run(
-            cmd_fallback, capture_output=True, text=True, timeout=timeout, cwd=str(PROJECT_DIR)
+    if r_machine.returncode == 0:
+        return r_machine
+
+    # Fallback: direct --user with XDG_RUNTIME_DIR (works outside Decky)
+    if not is_decky:
+        env = _user_ctl_env(username)
+        cmd_direct = [binary, "--user", *args]
+        r_direct = subprocess.run(
+            cmd_direct, capture_output=True, text=True, timeout=timeout, cwd=str(PROJECT_DIR), env=env
         )
-        if r_fallback.returncode == 0 or not _looks_like_bus_error(r_fallback.stderr):
-            return r_fallback
-    return r
+        if r_direct.returncode == 0:
+            return r_direct
+
+    return r_machine
 
 
 def service_state() -> str:
