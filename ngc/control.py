@@ -109,8 +109,7 @@ def _run_user_ctl(binary: str, args: list[str], *, timeout: float = 30.0) -> sub
     )
     # Debug: log what we passed
     import sys
-    _dbg = f"user={username} rc={r.returncode} XDG={env.get('XDG_RUNTIME_DIR','<none>')} bus={env.get('DBUS_SESSION_BUS_ADDRESS','<none>')}
-" + "\n"
+    _dbg = f"user={username} rc={r.returncode} XDG={env.get('XDG_RUNTIME_DIR','<none>')} bus={env.get('DBUS_SESSION_BUS_ADDRESS','<none>')}\n"
     if r.stderr:
         _dbg += f" stderr={r.stderr[:200]}\n"
     sys.stderr.write(_dbg)
